@@ -776,6 +776,7 @@ name = "thermal-plant-uno"
 version = "0.1.0"
 dependencies = [
  "arduino-hal",
+ "avr-device",
  "nb 1.1.0",
  "panic-halt",
  "ufmt",
