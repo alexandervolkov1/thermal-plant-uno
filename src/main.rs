@@ -38,6 +38,15 @@ fn millis() -> u32 {
     avr_device::interrupt::free(|cs| MILLIS.borrow(cs).get())
 }
 
+fn parse_percent(bytes: &[u8]) -> Option<u8> {
+    match bytes {
+        [single @ b'0'..=b'9'] => Some(single - b'0'),
+        [first @ b'1'..=b'9', second @ b'0'..=b'9'] => Some((first - b'0') * 10 + (second - b'0')),
+        [b'1', b'0', b'0'] => Some(100),
+        _ => None,
+    }
+}
+
 #[arduino_hal::entry]
 fn main() -> ! {
     let dp = arduino_hal::Peripherals::take().unwrap();
@@ -75,27 +84,63 @@ fn main() -> ! {
 
     let mut last_model_step = millis();
 
+    let mut command_buffer = [0u8; 16];
+    let mut command_len: usize = 0;
+
+    let mut discarding_command = false;
+
     loop {
         match serial.read() {
-            Ok(value) => match value {
-                b't' => {
-                    let scaled = libm::roundf(state.sample_temp * 100.0) as i32;
-                    let whole = scaled / 100;
-                    let fraction = scaled.abs() % 100;
+            Ok(value) => {
+                if value == b'\r' || value == b'\n' {
+                    if discarding_command {
+                        ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+                        discarding_command = false;
+                        command_len = 0;
+                    } else if command_len > 0 {
+                        let command = &command_buffer[..command_len];
 
-                    if fraction < 10 {
-                        ufmt::uwriteln!(&mut serial, "{}.0{}", whole, fraction).unwrap_infallible()
-                    } else {
-                        ufmt::uwriteln!(&mut serial, "{}.{}", whole, fraction).unwrap_infallible()
+                        match command {
+                            [b't'] => {
+                                let scaled = libm::roundf(state.sample_temp * 100.0) as i32;
+
+                                let whole = scaled / 100;
+                                let fraction = scaled.abs() % 100;
+
+                                if fraction < 10 {
+                                    ufmt::uwriteln!(&mut serial, "TEMP {}.0{}", whole, fraction)
+                                        .unwrap_infallible();
+                                } else {
+                                    ufmt::uwriteln!(&mut serial, "TEMP {}.{}", whole, fraction)
+                                        .unwrap_infallible();
+                                }
+                            }
+
+                            [b'p', percent @ ..] => {
+                                if let Some(percent) = parse_percent(percent) {
+                                    input.heater_command = percent as f32 / 100.0;
+                                    ufmt::uwriteln!(&mut serial, "OK").unwrap_infallible();
+                                } else {
+                                    ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+                                }
+                            }
+
+                            _ => {
+                                ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+                            }
+                        }
+
+                        command_len = 0;
                     }
+                } else if discarding_command {
+                } else if command_len < command_buffer.len() {
+                    command_buffer[command_len] = value;
+                    command_len += 1;
+                } else {
+                    command_len = 0;
+                    discarding_command = true;
                 }
-
-                b'0'..=b'9' => {
-                    input.heater_command = (value - b'0') as f32 / 10.0;
-                }
-
-                _ => {}
-            },
+            }
             Err(nb::Error::WouldBlock) => {}
             Err(nb::Error::Other(_)) => panic!(),
         }
