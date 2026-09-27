@@ -47,6 +47,24 @@ fn parse_percent(bytes: &[u8]) -> Option<u8> {
     }
 }
 
+enum Command {
+    Identity,
+    Temperature,
+    SetPower(u8),
+}
+
+fn parse_command(bytes: &[u8]) -> Option<Command> {
+    match bytes {
+        [b't'] => Some(Command::Temperature),
+
+        [b'i'] => Some(Command::Identity),
+
+        [b'p', percent @ ..] => parse_percent(percent).map(Command::SetPower),
+
+        _ => None,
+    }
+}
+
 #[arduino_hal::entry]
 fn main() -> ! {
     let dp = arduino_hal::Peripherals::take().unwrap();
@@ -98,36 +116,39 @@ fn main() -> ! {
                         discarding_command = false;
                         command_len = 0;
                     } else if command_len > 0 {
-                        let command = &command_buffer[..command_len];
-
-                        match command {
-                            [b't'] => {
-                                let scaled = libm::roundf(state.sample_temp * 100.0) as i32;
-
-                                let whole = scaled / 100;
-                                let fraction = scaled.abs() % 100;
-
-                                if fraction < 10 {
-                                    ufmt::uwriteln!(&mut serial, "TEMP {}.0{}", whole, fraction)
-                                        .unwrap_infallible();
-                                } else {
-                                    ufmt::uwriteln!(&mut serial, "TEMP {}.{}", whole, fraction)
+                        if let Some(command) = parse_command(&command_buffer[..command_len]) {
+                            match command {
+                                Command::Identity => {
+                                    ufmt::uwriteln!(&mut serial, "ID THERMAL_PLANT 1")
                                         .unwrap_infallible();
                                 }
-                            }
+                                Command::Temperature => {
+                                    let scaled = libm::roundf(state.sample_temp * 100.0) as i32;
 
-                            [b'p', percent @ ..] => {
-                                if let Some(percent) = parse_percent(percent) {
+                                    let whole = scaled / 100;
+                                    let fraction = scaled.abs() % 100;
+
+                                    if fraction < 10 {
+                                        ufmt::uwriteln!(
+                                            &mut serial,
+                                            "TEMP {}.0{}",
+                                            whole,
+                                            fraction
+                                        )
+                                        .unwrap_infallible();
+                                    } else {
+                                        ufmt::uwriteln!(&mut serial, "TEMP {}.{}", whole, fraction)
+                                            .unwrap_infallible();
+                                    }
+                                }
+
+                                Command::SetPower(percent) => {
                                     input.heater_command = percent as f32 / 100.0;
                                     ufmt::uwriteln!(&mut serial, "OK").unwrap_infallible();
-                                } else {
-                                    ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
                                 }
                             }
-
-                            _ => {
-                                ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
-                            }
+                        } else {
+                            ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
                         }
 
                         command_len = 0;
