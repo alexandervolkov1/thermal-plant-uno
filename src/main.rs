@@ -3,11 +3,14 @@
 #![feature(abi_avr_interrupt)]
 
 mod model;
+mod protocol;
 
 use arduino_hal::prelude::*;
 use core::cell::Cell;
 use model::{ThermalInput, ThermalParams, ThermalState, rk2_step};
 use panic_halt as _;
+
+use crate::protocol::{Command, parse_command};
 
 const MODEL_PERIOD_MS: u32 = 100;
 const MODEL_DT: f32 = 0.1;
@@ -38,30 +41,28 @@ fn millis() -> u32 {
     avr_device::interrupt::free(|cs| MILLIS.borrow(cs).get())
 }
 
-fn parse_percent(bytes: &[u8]) -> Option<u8> {
-    match bytes {
-        [single @ b'0'..=b'9'] => Some(single - b'0'),
-        [first @ b'1'..=b'9', second @ b'0'..=b'9'] => Some((first - b'0') * 10 + (second - b'0')),
-        [b'1', b'0', b'0'] => Some(100),
-        _ => None,
+fn write_temperature<W>(writer: &mut W, label: &str, value: f32) -> Result<(), W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    let scaled = libm::roundf(value * 100.0) as i32;
+
+    let negative = scaled < 0;
+    let magnitude = scaled.unsigned_abs();
+
+    let whole = magnitude / 100;
+    let fraction = magnitude % 100;
+
+    ufmt::uwrite!(writer, "{} ", label)?;
+
+    if negative {
+        ufmt::uwrite!(writer, "-")?;
     }
-}
 
-enum Command {
-    Identity,
-    Temperature,
-    SetPower(u8),
-}
-
-fn parse_command(bytes: &[u8]) -> Option<Command> {
-    match bytes {
-        [b't'] => Some(Command::Temperature),
-
-        [b'i'] => Some(Command::Identity),
-
-        [b'p', percent @ ..] => parse_percent(percent).map(Command::SetPower),
-
-        _ => None,
+    if fraction < 10 {
+        ufmt::uwriteln!(writer, "{}.0{}", whole, fraction)
+    } else {
+        ufmt::uwriteln!(writer, "{}.{}", whole, fraction)
     }
 }
 
@@ -122,24 +123,38 @@ fn main() -> ! {
                                     ufmt::uwriteln!(&mut serial, "ID THERMAL_PLANT 1")
                                         .unwrap_infallible();
                                 }
-                                Command::Temperature => {
-                                    let scaled = libm::roundf(state.sample_temp * 100.0) as i32;
 
-                                    let whole = scaled / 100;
-                                    let fraction = scaled.abs() % 100;
+                                Command::SampleTemperature => {
+                                    write_temperature(
+                                        &mut serial,
+                                        "SAMPLE_TEMP",
+                                        state.sample_temp,
+                                    )
+                                    .unwrap_infallible();
+                                }
 
-                                    if fraction < 10 {
-                                        ufmt::uwriteln!(
-                                            &mut serial,
-                                            "TEMP {}.0{}",
-                                            whole,
-                                            fraction
-                                        )
+                                Command::HeaterTemperature => {
+                                    write_temperature(
+                                        &mut serial,
+                                        "HEATER_TEMP",
+                                        state.heater_temp,
+                                    )
+                                    .unwrap_infallible();
+                                }
+
+                                Command::AmbientTemperature => {
+                                    write_temperature(
+                                        &mut serial,
+                                        "AMBIENT_TEMP",
+                                        input.ambient_temp,
+                                    )
+                                    .unwrap_infallible();
+                                }
+
+                                Command::GetPower => {
+                                    let percent = libm::roundf(input.heater_command * 100.0) as u8;
+                                    ufmt::uwriteln!(&mut serial, "POWER {}", percent)
                                         .unwrap_infallible();
-                                    } else {
-                                        ufmt::uwriteln!(&mut serial, "TEMP {}.{}", whole, fraction)
-                                            .unwrap_infallible();
-                                    }
                                 }
 
                                 Command::SetPower(percent) => {
