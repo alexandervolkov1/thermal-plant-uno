@@ -45,6 +45,17 @@ fn write_temperature<W>(writer: &mut W, label: &str, value: f32) -> Result<(), W
 where
     W: ufmt::uWrite + ?Sized,
 {
+    ufmt::uwrite!(writer, "{} ", label)?;
+
+    write_fixed_2(writer, value)?;
+
+    ufmt::uwriteln!(writer, "")
+}
+
+fn write_fixed_2<W>(writer: &mut W, value: f32) -> Result<(), W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
     let scaled = libm::roundf(value * 100.0) as i32;
 
     let negative = scaled < 0;
@@ -53,16 +64,14 @@ where
     let whole = magnitude / 100;
     let fraction = magnitude % 100;
 
-    ufmt::uwrite!(writer, "{} ", label)?;
-
     if negative {
         ufmt::uwrite!(writer, "-")?;
     }
 
     if fraction < 10 {
-        ufmt::uwriteln!(writer, "{}.0{}", whole, fraction)
+        ufmt::uwrite!(writer, "{}.0{}", whole, fraction)
     } else {
-        ufmt::uwriteln!(writer, "{}.{}", whole, fraction)
+        ufmt::uwrite!(writer, "{}.{}", whole, fraction)
     }
 }
 
@@ -92,6 +101,9 @@ fn main() -> ! {
 
         heater_loss: 1.0,
         sample_loss: 0.5,
+
+        heater_radiation: 4.0e-10,
+        sample_radiation: 2.0e-10,
 
         max_heater_power: 100.0,
     };
@@ -160,6 +172,36 @@ fn main() -> ! {
                                 Command::SetPower(percent) => {
                                     input.heater_command = percent as f32 / 100.0;
                                     ufmt::uwriteln!(&mut serial, "OK").unwrap_infallible();
+                                }
+
+                                Command::Reset => {
+                                    input.heater_command = 0.0;
+                                    state.heater_temp = input.ambient_temp;
+                                    state.sample_temp = input.ambient_temp;
+
+                                    last_model_step = millis();
+
+                                    ufmt::uwriteln!(&mut serial, "OK").unwrap_infallible();
+                                }
+
+                                Command::State => {
+                                    ufmt::uwrite!(&mut serial, "STATE ").unwrap_infallible();
+
+                                    write_fixed_2(&mut serial, state.heater_temp)
+                                        .unwrap_infallible();
+
+                                    ufmt::uwrite!(&mut serial, " ").unwrap_infallible();
+                                    write_fixed_2(&mut serial, state.sample_temp)
+                                        .unwrap_infallible();
+
+                                    ufmt::uwrite!(&mut serial, " ").unwrap_infallible();
+                                    write_fixed_2(&mut serial, input.ambient_temp)
+                                        .unwrap_infallible();
+
+                                    let percent = libm::roundf(input.heater_command * 100.0) as u8;
+
+                                    ufmt::uwriteln!(&mut serial, " {}", percent)
+                                        .unwrap_infallible();
                                 }
                             }
                         } else {

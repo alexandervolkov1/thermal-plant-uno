@@ -5,6 +5,8 @@ pub enum Command {
     AmbientTemperature,
     GetPower,
     SetPower(u8),
+    Reset,
+    State,
 }
 
 fn parse_percent(bytes: &[u8]) -> Option<u8> {
@@ -29,6 +31,10 @@ pub fn parse_command(bytes: &[u8]) -> Option<Command> {
         [b'p'] => Some(Command::GetPower),
 
         [b'p', percent @ ..] => parse_percent(percent).map(Command::SetPower),
+
+        [b'r'] => Some(Command::Reset),
+
+        [b's'] => Some(Command::State),
 
         _ => None,
     }

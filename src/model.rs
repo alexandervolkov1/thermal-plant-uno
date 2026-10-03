@@ -14,6 +14,9 @@ pub struct ThermalParams {
     pub heater_loss: f32,
     pub sample_loss: f32,
 
+    pub heater_radiation: f32,
+    pub sample_radiation: f32,
+
     pub max_heater_power: f32,
 }
 
@@ -42,10 +45,23 @@ pub fn derivatives(
 
     let sample_to_ambient = params.sample_loss * (state.sample_temp - input.ambient_temp);
 
-    let heater_temp_rate =
-        (heater_power - heater_to_sample - heater_to_ambient) / params.heater_capacity;
+    let heater_radiation = radiative_loss(
+        state.heater_temp,
+        input.ambient_temp,
+        params.heater_radiation,
+    );
 
-    let sample_temp_rate = (heater_to_sample - sample_to_ambient) / params.sample_capacity;
+    let sample_radiation = radiative_loss(
+        state.sample_temp,
+        input.ambient_temp,
+        params.sample_radiation,
+    );
+
+    let heater_temp_rate = (heater_power - heater_to_sample - heater_to_ambient - heater_radiation)
+        / params.heater_capacity;
+
+    let sample_temp_rate =
+        (heater_to_sample - sample_to_ambient - sample_radiation) / params.sample_capacity;
 
     ThermalDerivative {
         heater_temp_rate,
@@ -89,4 +105,14 @@ pub fn rk2_step(
         heater_temp: state.heater_temp + k2.heater_temp_rate * dt,
         sample_temp: state.sample_temp + k2.sample_temp_rate * dt,
     }
+}
+
+fn radiative_loss(temperature: f32, ambient_temperature: f32, coefficient: f32) -> f32 {
+    let temp_k = temperature + 273.15;
+    let amb_temp_k = ambient_temperature + 273.15;
+
+    let temp_k4 = temp_k * temp_k * temp_k * temp_k;
+    let amb_temp_k4 = amb_temp_k * amb_temp_k * amb_temp_k * amb_temp_k;
+
+    coefficient * (temp_k4 - amb_temp_k4)
 }
