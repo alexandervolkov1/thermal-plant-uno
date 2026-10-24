@@ -2,13 +2,12 @@
 #![no_main]
 #![feature(abi_avr_interrupt)]
 
-mod model;
 mod protocol;
 
 use arduino_hal::prelude::*;
 use core::cell::Cell;
-use model::{ThermalInput, ThermalParams, ThermalState, rk2_step};
 use panic_halt as _;
+use thermal_plant_model::{ThermalInput, ThermalParams, ThermalState, rk2_step};
 
 use crate::protocol::{Command, parse_command};
 
