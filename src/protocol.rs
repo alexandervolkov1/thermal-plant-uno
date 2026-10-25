@@ -226,4 +226,29 @@ mod tests {
 
         assert!(matches!(parse_command(b"p50"), Some(Command::SetPower(50))));
     }
+
+    #[test]
+    fn request_id_boundaries_and_recovery() {
+        for (bytes, id) in [(&b"o 1 get device"[..], 1), (b"o 65535 get power", 65535)] {
+            assert_eq!(parse(bytes).unwrap().id, id);
+        }
+        for bytes in [
+            &b"o 0 get power"[..],
+            b"o 01 get power",
+            b"o -1 get power",
+            b"o 65536 get power",
+            b"o 1x get power",
+            b"o  get power",
+        ] {
+            assert_eq!(parse(bytes), Err(ParseError { id: None }));
+        }
+        for bytes in [
+            &b"o 65535"[..],
+            b"o 65535 get ",
+            b"o 65535 set power",
+            b"o 65535 get power ",
+        ] {
+            assert_eq!(parse(bytes), Err(ParseError { id: Some(65535) }));
+        }
+    }
 }

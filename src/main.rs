@@ -1,21 +1,31 @@
-#![no_std]
-#![no_main]
-#![feature(abi_avr_interrupt)]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+#![cfg_attr(not(test), feature(abi_avr_interrupt))]
 
 mod protocol;
 
+#[cfg(test)]
+#[path = "../tests/operator.rs"]
+mod tests;
+
+#[cfg(not(test))]
 use arduino_hal::prelude::*;
+#[cfg(not(test))]
 use core::cell::Cell;
+#[cfg(not(test))]
 use panic_halt as _;
 use thermal_plant_model::{SimulationConfig, ThermalPlant};
 
 use crate::protocol::{Action, Command, Scope, parse, parse_command, parse_percent};
 
+#[cfg(not(test))]
 const MODEL_PERIOD_MS: u32 = 100;
 
+#[cfg(not(test))]
 static MILLIS: avr_device::interrupt::Mutex<Cell<u32>> =
     avr_device::interrupt::Mutex::new(Cell::new(0));
 
+#[cfg(not(test))]
 fn millis_init(timer: arduino_hal::pac::TC0) {
     timer.tccr0a().write(|w| w.wgm0().ctc());
 
@@ -26,6 +36,7 @@ fn millis_init(timer: arduino_hal::pac::TC0) {
     timer.timsk0().write(|w| w.ocie0a().set_bit());
 }
 
+#[cfg(not(test))]
 #[avr_device::interrupt(atmega328p)]
 fn TIMER0_COMPA() {
     avr_device::interrupt::free(|cs| {
@@ -35,6 +46,7 @@ fn TIMER0_COMPA() {
     });
 }
 
+#[cfg(not(test))]
 fn millis() -> u32 {
     avr_device::interrupt::free(|cs| MILLIS.borrow(cs).get())
 }
@@ -109,6 +121,10 @@ where
             ufmt::uwriteln!(writer, "@{} ok {}", id, percent)
         }
 
+        Action::Get(key) if key == b"device" => {
+            ufmt::uwriteln!(writer, "@{} ok THERMAL_PLANT 2", id)
+        }
+
         Action::Set { key, value } if key == b"power" => match parse_percent(value) {
             Some(percent) => {
                 if plant.set_power_percent(percent as f32).is_ok() {
@@ -130,6 +146,38 @@ where
     }
 }
 
+fn write_syntax_error<W>(writer: &mut W, bytes: &[u8]) -> Result<(), W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    let id = match parse(bytes) {
+        Ok(request) => Some(request.id),
+        Err(error) => error.id,
+    };
+    match id {
+        Some(id) => ufmt::uwriteln!(writer, "@{} err syntax", id),
+        None => ufmt::uwriteln!(writer, "ERR"),
+    }
+}
+
+fn handle_scoped_request<W>(
+    writer: &mut W,
+    bytes: &[u8],
+    plant: &mut ThermalPlant,
+) -> Result<(), W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    match parse(bytes) {
+        Ok(request) => match request.scope {
+            Scope::Operator => handle_operator_request(writer, request.id, request.action, plant),
+            Scope::Designer => ufmt::uwriteln!(writer, "@{} err unsupported", request.id),
+        },
+        Err(_) => write_syntax_error(writer, bytes),
+    }
+}
+
+#[cfg(not(test))]
 #[arduino_hal::entry]
 fn main() -> ! {
     let dp = arduino_hal::Peripherals::take().unwrap();
@@ -158,7 +206,8 @@ fn main() -> ! {
             Ok(value) => {
                 if value == b'\r' || value == b'\n' {
                     if discarding_command {
-                        ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+                        write_syntax_error(&mut serial, &command_buffer[..command_len])
+                            .unwrap_infallible();
                         discarding_command = false;
                         command_len = 0;
                     } else if command_len > 0 {
@@ -246,37 +295,12 @@ fn main() -> ! {
                                 }
                             }
                         } else if command_buffer[0] == b'o' || command_buffer[0] == b'd' {
-                            match parse(&command_buffer[..command_len]) {
-                                Ok(request) => match request.scope {
-                                    Scope::Operator => {
-                                        handle_operator_request(
-                                            &mut serial,
-                                            request.id,
-                                            request.action,
-                                            &mut plant,
-                                        )
-                                        .unwrap_infallible();
-                                    }
-
-                                    Scope::Designer => {
-                                        ufmt::uwriteln!(
-                                            &mut serial,
-                                            "@{} err unsupported",
-                                            request.id
-                                        )
-                                        .unwrap_infallible();
-                                    }
-                                },
-
-                                Err(error) => {
-                                    if let Some(id) = error.id {
-                                        ufmt::uwriteln!(&mut serial, "@{} err syntax", id)
-                                            .unwrap_infallible();
-                                    } else {
-                                        ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
-                                    }
-                                }
-                            }
+                            handle_scoped_request(
+                                &mut serial,
+                                &command_buffer[..command_len],
+                                &mut plant,
+                            )
+                            .unwrap_infallible();
                         } else {
                             ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
                         }
@@ -288,7 +312,6 @@ fn main() -> ! {
                     command_buffer[command_len] = value;
                     command_len += 1;
                 } else {
-                    command_len = 0;
                     discarding_command = true;
                 }
             }
