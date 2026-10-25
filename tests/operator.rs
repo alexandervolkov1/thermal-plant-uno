@@ -359,6 +359,101 @@ fn designer_integer_boundaries_round_trip_exactly() {
 }
 
 #[test]
+fn room_capacity_integer_form_preserves_stage2_contract() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    plant.set_power_percent(75.0).unwrap();
+    for (text, accepted) in [
+        ("350000", true),
+        ("16777216", true),
+        ("16777217", false),
+        ("16777218", true),
+        ("4294967040", true),
+        ("4294967295", false),
+        ("4294967296", false),
+        ("+1", false),
+        ("-1", false),
+        ("+0", false),
+        ("-0", false),
+        ("0", true),
+        ("000350000", true),
+        ("0000", true),
+        ("0004294967296", false),
+    ] {
+        let previous = staged.parameters.room_capacity.to_bits();
+        let request = std::format!("d 101 set room.capacity {text}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            (
+                if accepted {
+                    "@101 ok\n"
+                } else {
+                    "@101 err value\n"
+                }
+                .into(),
+                false
+            ),
+            "{text}"
+        );
+        if accepted {
+            assert_eq!(
+                staged.parameters.room_capacity.to_bits(),
+                text.parse::<f32>().unwrap().to_bits()
+            );
+        } else {
+            assert_eq!(
+                staged.parameters.room_capacity.to_bits(),
+                previous,
+                "{text}"
+            );
+        }
+        assert_eq!(active.parameters.room_capacity, 300000.0);
+        assert_eq!(plant.power_percent(), 75.0);
+    }
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 101 apply"),
+        ("@101 err config\n".into(), false)
+    );
+    assert_eq!(plant.power_percent(), 75.0);
+    for text in [
+        "350000.5",
+        "1e6",
+        "4294967296.0",
+        "4294967296e0",
+        "+1.0",
+        "-1e0",
+        "16777217.0",
+        "16777217e0",
+    ] {
+        let request = std::format!("d 102 set room.capacity {text}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@102 ok\n".into(), false),
+            "{text}"
+        );
+        assert_eq!(
+            staged.parameters.room_capacity.to_bits(),
+            text.parse::<f32>().unwrap().to_bits()
+        );
+        assert_eq!(active.parameters.room_capacity, 300000.0);
+        assert_eq!(plant.power_percent(), 75.0);
+    }
+    // Other f32 parameters still accept signed and wider integer forms.
+    for text in ["+1", "-1", "4294967296"] {
+        let request = std::format!("d 103 set heater.capacity {text}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@103 ok\n".into(), false)
+        );
+        assert_eq!(
+            staged.parameters.heater_capacity.to_bits(),
+            text.parse::<f32>().unwrap().to_bits()
+        );
+    }
+}
+
+#[test]
 fn designer_apply_replaces_plant_and_reset_reproduces_active_configuration() {
     let mut active = SimulationConfig::default();
     // Exercise seeded behavior without adding any further Designer keys.

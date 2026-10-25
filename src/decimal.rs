@@ -104,11 +104,17 @@ fn compare_binary(
     left.compare(&right)
 }
 
-// Preserve exact integer input for room.capacity; decimal/exponent input rounds to nearest-even.
+// Preserve Stage 2 u32 integer input for room.capacity; decimal/exponent input rounds normally.
 pub(crate) fn parse_decimal(bytes: &[u8], exact_integer: bool) -> Option<f32> {
     use core::cmp::Ordering;
     if bytes.is_empty() || bytes.len() > 64 {
         return None;
+    }
+    if exact_integer && !bytes.iter().any(|byte| matches!(*byte, b'.' | b'e' | b'E')) {
+        let integer = crate::protocol::parse_u32(bytes)?;
+        let value = integer as f32;
+        // u32::MAX rounds up to 2^32 and saturates when cast back to u32.
+        return (integer != u32::MAX && value as u32 == integer).then_some(value);
     }
     let negative = bytes[0] == b'-';
     let mut index = usize::from(negative || bytes[0] == b'+');
@@ -137,7 +143,6 @@ pub(crate) fn parse_decimal(bytes: &[u8], exact_integer: bool) -> Option<f32> {
     if digits == 0 {
         return None;
     }
-    let integer_input = !dot && index == bytes.len();
     let mut exponent = 0i16;
     if index < bytes.len() && (bytes[index] == b'e' || bytes[index] == b'E') {
         index += 1;
@@ -190,10 +195,6 @@ pub(crate) fn parse_decimal(bytes: &[u8], exact_integer: bool) -> Option<f32> {
         }
     }
     let (mantissa, binary_exponent) = binary_parts(lower);
-    let exact = compare_binary(&numerator, &denominator, mantissa, binary_exponent);
-    if exact_integer && integer_input && exact != Ordering::Equal {
-        return None;
-    }
     let midpoint = compare_binary(
         &numerator,
         &denominator,
@@ -431,5 +432,194 @@ mod tests {
         }
         assert!(parse_decimal(b"+16777217", true).is_none());
         assert!(parse_decimal(b"-16777217", true).is_none());
+    }
+
+    fn assert_host_reference(text: &str) {
+        assert!(text.len() <= 64, "{text}");
+        let expected = text.parse::<f32>().unwrap();
+        let nonzero = text
+            .split(['e', 'E'])
+            .next()
+            .unwrap()
+            .bytes()
+            .any(|byte| matches!(byte, b'1'..=b'9'));
+        let actual = parse_decimal(text.as_bytes(), false);
+        if !expected.is_finite() || (expected == 0.0 && nonzero) {
+            assert!(actual.is_none(), "{text}: {actual:?}");
+        } else {
+            assert_eq!(actual.map(f32::to_bits), Some(expected.to_bits()), "{text}");
+        }
+    }
+
+    fn assert_bits_round_trip(bits: u32) {
+        let value = f32::from_bits(bits);
+        assert!(value.is_finite());
+        let mut output = Output::default();
+        write_decimal(&mut output, value).unwrap();
+        assert_eq!(
+            output.0.parse::<f32>().unwrap().to_bits(),
+            bits,
+            "bits={bits:08x}: {}",
+            output.0
+        );
+        assert_eq!(
+            parse_decimal(output.0.as_bytes(), false).map(f32::to_bits),
+            Some(bits),
+            "bits={bits:08x}: {}",
+            output.0
+        );
+        // Also use the independent host formatter to generate parser input.
+        assert_host_reference(&value.to_string());
+    }
+
+    #[test]
+    fn property_random_finite_and_subnormal_round_trips() {
+        let mut state = 0x6d2b79f5u32;
+        let mut checked = 0;
+        while checked < 100_000 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            if f32::from_bits(state).is_finite() {
+                assert_bits_round_trip(state);
+                checked += 1;
+            }
+        }
+        for _ in 0..4096 {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            assert_bits_round_trip(state & 0x807fffff);
+        }
+    }
+
+    #[test]
+    fn property_powers_neighbors_and_finite_boundaries() {
+        for sign in [0u32, 0x80000000] {
+            for magnitude in [
+                0, 1, 2, 0x7ffffe, 0x7fffff, 0x800000, 0x800001, 0x7f7ffffe, 0x7f7fffff,
+            ] {
+                assert_bits_round_trip(sign | magnitude);
+            }
+            for exponent in 1u32..255 {
+                let power = exponent << 23;
+                for bits in power - 2..=power + 2 {
+                    assert_bits_round_trip(sign | bits);
+                }
+            }
+            for bits in 0x7ffff0..=0x800010 {
+                assert_bits_round_trip(sign | bits);
+            }
+        }
+    }
+
+    // Construct decimal neighbors independently of the production arithmetic.
+    // One extra decimal place makes +/- one final digit strictly below/above.
+    fn decimal_neighbors(text: &str, extra_place: bool) -> [std::string::String; 3] {
+        let (mantissa, exponent) = text.split_once('e').unwrap_or((text, ""));
+        let suffix = if exponent.is_empty() {
+            std::string::String::new()
+        } else {
+            std::format!("e{exponent}")
+        };
+        let base = if !extra_place {
+            mantissa.to_owned()
+        } else if mantissa.contains('.') {
+            std::format!("{mantissa}0")
+        } else {
+            std::format!("{mantissa}.0")
+        };
+        let mut result = [
+            std::string::String::new(),
+            std::format!("{base}{suffix}"),
+            std::string::String::new(),
+        ];
+        for (slot, increment) in [(0, false), (2, true)] {
+            let mut bytes = base.as_bytes().to_vec();
+            let mut carry = true;
+            for byte in bytes.iter_mut().rev() {
+                if *byte == b'.' {
+                    continue;
+                }
+                if increment && *byte == b'9' {
+                    *byte = b'0';
+                } else if !increment && *byte == b'0' {
+                    *byte = b'9';
+                } else {
+                    *byte = if increment { *byte + 1 } else { *byte - 1 };
+                    carry = false;
+                    break;
+                }
+            }
+            assert!(!carry);
+            result[slot] =
+                std::format!("{}{suffix}", std::string::String::from_utf8(bytes).unwrap());
+        }
+        result
+    }
+
+    #[test]
+    fn property_exact_midpoints_and_decimal_neighbors() {
+        // f64 is used only in host tests. A sum of adjacent f32 values and its
+        // half are exact in f64. In this exponent range 60 fractional decimal
+        // places express the midpoint exactly and fit the UART token limit.
+        for exponent in 107u32..=167 {
+            for fraction in [0, 1, 0x3fffff, 0x7ffffe] {
+                let lower = (exponent << 23) | fraction;
+                let upper = lower + 1;
+                let midpoint =
+                    (f64::from(f32::from_bits(lower)) + f64::from(f32::from_bits(upper))) / 2.0;
+                let exact = std::format!("{midpoint:.60}");
+                let exact = exact.trim_end_matches('0').trim_end_matches('.');
+                let neighbors = decimal_neighbors(exact, true);
+                for (index, text) in neighbors.iter().enumerate() {
+                    let expected_bits = match index {
+                        0 => lower,
+                        2 => upper,
+                        _ => {
+                            if lower & 1 == 0 {
+                                lower
+                            } else {
+                                upper
+                            }
+                        }
+                    };
+                    assert_eq!(
+                        text.parse::<f32>().unwrap().to_bits(),
+                        expected_bits,
+                        "{text}"
+                    );
+                    assert_host_reference(text);
+                    assert_host_reference(&std::format!("-{text}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn property_overflow_and_underflow_rounding_edges() {
+        // Exact overflow midpoint, including values immediately on either side.
+        let overflow = decimal_neighbors("340282356779733661637539395458142568448", true);
+        assert_eq!(overflow[0].parse::<f32>().unwrap(), f32::MAX);
+        assert!(overflow[1].parse::<f32>().unwrap().is_infinite());
+        assert!(overflow[2].parse::<f32>().unwrap().is_infinite());
+        for text in overflow {
+            assert_host_reference(&text);
+            assert_host_reference(&std::format!("-{text}"));
+        }
+        // Exact tiny midpoints require more than 64 decimal characters. Use
+        // host-generated 55-digit approximations with neighbors on both sides.
+        for lower in [0u32, 1, 0x7fffff] {
+            let midpoint =
+                (f64::from(f32::from_bits(lower)) + f64::from(f32::from_bits(lower + 1))) / 2.0;
+            let approximation = std::format!("{midpoint:.54e}");
+            // A step at the approximation's own precision exceeds its rounding
+            // error. An extra place would not necessarily straddle the midpoint.
+            let neighbors = decimal_neighbors(&approximation, false);
+            assert_eq!(neighbors[0].parse::<f32>().unwrap().to_bits(), lower);
+            assert_eq!(neighbors[2].parse::<f32>().unwrap().to_bits(), lower + 1);
+            for text in neighbors {
+                assert_host_reference(&text);
+                assert_host_reference(&std::format!("-{text}"));
+            }
+        }
     }
 }
