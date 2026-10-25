@@ -2,6 +2,7 @@ pub enum Command {
     Identity,
     SampleTemperature,
     HeaterTemperature,
+    RoomTemperature,
     AmbientTemperature,
     GetPower,
     SetPower(u8),
@@ -25,6 +26,8 @@ pub fn parse_command(bytes: &[u8]) -> Option<Command> {
         [b't', b's'] => Some(Command::SampleTemperature),
 
         [b't', b'h'] => Some(Command::HeaterTemperature),
+
+        [b't', b'r'] => Some(Command::RoomTemperature),
 
         [b't', b'a'] => Some(Command::AmbientTemperature),
 

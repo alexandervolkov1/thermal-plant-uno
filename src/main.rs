@@ -116,7 +116,7 @@ fn main() -> ! {
                                     write_temperature(
                                         &mut serial,
                                         "SAMPLE_TEMP",
-                                        plant.temperatures().sample_temp,
+                                        plant.measured_temperatures().sample_temp,
                                     )
                                     .unwrap_infallible();
                                 }
@@ -125,7 +125,16 @@ fn main() -> ! {
                                     write_temperature(
                                         &mut serial,
                                         "HEATER_TEMP",
-                                        plant.temperatures().heater_temp,
+                                        plant.measured_temperatures().heater_temp,
+                                    )
+                                    .unwrap_infallible();
+                                }
+
+                                Command::RoomTemperature => {
+                                    write_temperature(
+                                        &mut serial,
+                                        "ROOM_TEMP",
+                                        plant.measured_temperatures().room_temp,
                                     )
                                     .unwrap_infallible();
                                 }
