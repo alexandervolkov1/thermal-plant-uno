@@ -1,21 +1,33 @@
-#![no_std]
-#![no_main]
-#![feature(abi_avr_interrupt)]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+#![cfg_attr(not(test), feature(abi_avr_interrupt))]
 
 mod protocol;
 
+#[cfg(test)]
+#[path = "../tests/operator.rs"]
+mod tests;
+
+#[cfg(not(test))]
 use arduino_hal::prelude::*;
+#[cfg(not(test))]
 use core::cell::Cell;
+#[cfg(not(test))]
 use panic_halt as _;
 use thermal_plant_model::{SimulationConfig, ThermalPlant};
 
-use crate::protocol::{Action, Command, Scope, parse, parse_command, parse_percent};
+use crate::protocol::{
+    Action, Command, Scope, parse, parse_command, parse_percent, parse_u32, token_eq,
+};
 
+#[cfg(not(test))]
 const MODEL_PERIOD_MS: u32 = 100;
 
+#[cfg(not(test))]
 static MILLIS: avr_device::interrupt::Mutex<Cell<u32>> =
     avr_device::interrupt::Mutex::new(Cell::new(0));
 
+#[cfg(not(test))]
 fn millis_init(timer: arduino_hal::pac::TC0) {
     timer.tccr0a().write(|w| w.wgm0().ctc());
 
@@ -26,6 +38,7 @@ fn millis_init(timer: arduino_hal::pac::TC0) {
     timer.timsk0().write(|w| w.ocie0a().set_bit());
 }
 
+#[cfg(not(test))]
 #[avr_device::interrupt(atmega328p)]
 fn TIMER0_COMPA() {
     avr_device::interrupt::free(|cs| {
@@ -35,6 +48,7 @@ fn TIMER0_COMPA() {
     });
 }
 
+#[cfg(not(test))]
 fn millis() -> u32 {
     avr_device::interrupt::free(|cs| MILLIS.borrow(cs).get())
 }
@@ -92,24 +106,28 @@ where
     W: ufmt::uWrite + ?Sized,
 {
     match action {
-        Action::Get(key) if key == b"t.sample" => {
+        Action::Get(key) if token_eq(key, b"t.sample") => {
             write_reply_temperature(writer, id, plant.measured_temperatures().sample_temp)
         }
 
-        Action::Get(key) if key == b"t.heater" => {
+        Action::Get(key) if token_eq(key, b"t.heater") => {
             write_reply_temperature(writer, id, plant.measured_temperatures().heater_temp)
         }
 
-        Action::Get(key) if key == b"t.room" => {
+        Action::Get(key) if token_eq(key, b"t.room") => {
             write_reply_temperature(writer, id, plant.measured_temperatures().room_temp)
         }
 
-        Action::Get(key) if key == b"power" => {
+        Action::Get(key) if token_eq(key, b"power") => {
             let percent = libm::roundf(plant.power_percent()) as u8;
             ufmt::uwriteln!(writer, "@{} ok {}", id, percent)
         }
 
-        Action::Set { key, value } if key == b"power" => match parse_percent(value) {
+        Action::Get(key) if token_eq(key, b"device") => {
+            ufmt::uwriteln!(writer, "@{} ok THERMAL_PLANT 2", id)
+        }
+
+        Action::Set { key, value } if token_eq(key, b"power") => match parse_percent(value) {
             Some(percent) => {
                 if plant.set_power_percent(percent as f32).is_ok() {
                     ufmt::uwriteln!(writer, "@{} ok", id)
@@ -130,6 +148,123 @@ where
     }
 }
 
+fn handle_designer_request<W>(
+    writer: &mut W,
+    id: u16,
+    action: Action<'_>,
+    plant: &mut ThermalPlant,
+    active_config: &mut SimulationConfig,
+    staged_config: &mut SimulationConfig,
+) -> Result<bool, W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    match action {
+        Action::Get(key) if token_eq(key, b"room.capacity") => {
+            ufmt::uwriteln!(
+                writer,
+                "@{} ok {}",
+                id,
+                staged_config.parameters.room_capacity as u32
+            )?;
+        }
+        Action::Get(key) if token_eq(key, b"seed") => {
+            ufmt::uwriteln!(writer, "@{} ok {}", id, staged_config.seed)?;
+        }
+        Action::Set { key, value } if token_eq(key, b"room.capacity") || token_eq(key, b"seed") => {
+            let value = match parse_u32(value) {
+                Some(value) => value,
+                None => {
+                    ufmt::uwriteln!(writer, "@{} err value", id)?;
+                    return Ok(false);
+                }
+            };
+            if token_eq(key, b"seed") {
+                staged_config.seed = value;
+            } else {
+                let capacity = value as f32;
+                // Stage 2 accepts decimal u32 integers only, exactly representable as f32.
+                // Reject rounding, including the saturating u32::MAX round-trip case.
+                if value == u32::MAX || capacity as u32 != value {
+                    ufmt::uwriteln!(writer, "@{} err value", id)?;
+                    return Ok(false);
+                }
+                staged_config.parameters.room_capacity = capacity;
+            }
+            ufmt::uwriteln!(writer, "@{} ok", id)?;
+        }
+        Action::Get(_) | Action::Set { .. } => {
+            ufmt::uwriteln!(writer, "@{} err key", id)?;
+        }
+        Action::Apply => match ThermalPlant::new(*staged_config) {
+            Ok(replacement) => {
+                *plant = replacement;
+                *active_config = *staged_config;
+                ufmt::uwriteln!(writer, "@{} ok", id)?;
+                return Ok(true);
+            }
+            Err(_) => ufmt::uwriteln!(writer, "@{} err config", id)?,
+        },
+        Action::Reset => match ThermalPlant::new(*active_config) {
+            Ok(replacement) => {
+                *plant = replacement;
+                *staged_config = *active_config;
+                ufmt::uwriteln!(writer, "@{} ok", id)?;
+                return Ok(true);
+            }
+            Err(_) => ufmt::uwriteln!(writer, "@{} err config", id)?,
+        },
+    }
+    Ok(false)
+}
+
+fn write_syntax_error<W>(writer: &mut W, bytes: &[u8]) -> Result<(), W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    let id = match parse(bytes) {
+        Ok(request) => Some(request.id),
+        Err(error) => error.id,
+    };
+    match id {
+        Some(id) => ufmt::uwriteln!(writer, "@{} err syntax", id),
+        None => ufmt::uwriteln!(writer, "ERR"),
+    }
+}
+
+fn handle_scoped_request<W>(
+    writer: &mut W,
+    bytes: &[u8],
+    plant: &mut ThermalPlant,
+    active_config: &mut SimulationConfig,
+    staged_config: &mut SimulationConfig,
+) -> Result<bool, W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    match parse(bytes) {
+        Ok(request) => match request.scope {
+            Scope::Operator => {
+                handle_operator_request(writer, request.id, request.action, plant)?;
+                Ok(false)
+            }
+            Scope::Designer => handle_designer_request(
+                writer,
+                request.id,
+                request.action,
+                plant,
+                active_config,
+                staged_config,
+            ),
+        },
+        Err(_) => {
+            write_syntax_error(writer, bytes)?;
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(not(test))]
 #[arduino_hal::entry]
 fn main() -> ! {
     let dp = arduino_hal::Peripherals::take().unwrap();
@@ -143,8 +278,9 @@ fn main() -> ! {
         avr_device::interrupt::enable();
     }
 
-    let config = SimulationConfig::default();
-    let mut plant = ThermalPlant::new(config).unwrap();
+    let mut active_config = SimulationConfig::default();
+    let mut staged_config = active_config;
+    let mut plant = ThermalPlant::new(active_config).unwrap();
 
     let mut last_model_step = millis();
 
@@ -158,7 +294,8 @@ fn main() -> ! {
             Ok(value) => {
                 if value == b'\r' || value == b'\n' {
                     if discarding_command {
-                        ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+                        write_syntax_error(&mut serial, &command_buffer[..command_len])
+                            .unwrap_infallible();
                         discarding_command = false;
                         command_len = 0;
                     } else if command_len > 0 {
@@ -200,7 +337,7 @@ fn main() -> ! {
                                     write_temperature(
                                         &mut serial,
                                         "AMBIENT_TEMP",
-                                        config.background_temp,
+                                        active_config.background_temp,
                                     )
                                     .unwrap_infallible();
                                 }
@@ -217,7 +354,7 @@ fn main() -> ! {
                                 }
 
                                 Command::Reset => {
-                                    plant = ThermalPlant::new(config).unwrap();
+                                    plant = ThermalPlant::new(active_config).unwrap();
 
                                     last_model_step = millis();
 
@@ -236,7 +373,7 @@ fn main() -> ! {
                                         .unwrap_infallible();
 
                                     ufmt::uwrite!(&mut serial, " ").unwrap_infallible();
-                                    write_fixed_2(&mut serial, config.background_temp)
+                                    write_fixed_2(&mut serial, active_config.background_temp)
                                         .unwrap_infallible();
 
                                     let percent = libm::roundf(plant.power_percent()) as u8;
@@ -246,36 +383,16 @@ fn main() -> ! {
                                 }
                             }
                         } else if command_buffer[0] == b'o' || command_buffer[0] == b'd' {
-                            match parse(&command_buffer[..command_len]) {
-                                Ok(request) => match request.scope {
-                                    Scope::Operator => {
-                                        handle_operator_request(
-                                            &mut serial,
-                                            request.id,
-                                            request.action,
-                                            &mut plant,
-                                        )
-                                        .unwrap_infallible();
-                                    }
-
-                                    Scope::Designer => {
-                                        ufmt::uwriteln!(
-                                            &mut serial,
-                                            "@{} err unsupported",
-                                            request.id
-                                        )
-                                        .unwrap_infallible();
-                                    }
-                                },
-
-                                Err(error) => {
-                                    if let Some(id) = error.id {
-                                        ufmt::uwriteln!(&mut serial, "@{} err syntax", id)
-                                            .unwrap_infallible();
-                                    } else {
-                                        ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
-                                    }
-                                }
+                            if handle_scoped_request(
+                                &mut serial,
+                                &command_buffer[..command_len],
+                                &mut plant,
+                                &mut active_config,
+                                &mut staged_config,
+                            )
+                            .unwrap_infallible()
+                            {
+                                last_model_step = millis();
                             }
                         } else {
                             ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
@@ -288,7 +405,6 @@ fn main() -> ! {
                     command_buffer[command_len] = value;
                     command_len += 1;
                 } else {
-                    command_len = 0;
                     discarding_command = true;
                 }
             }
