@@ -186,7 +186,7 @@ fn overlong_requests_report_syntax_without_applying_a_truncated_value() {
 }
 
 #[test]
-fn temperature_formatting_and_legacy_labels_are_unchanged() {
+fn temperature_formatting_is_unchanged() {
     for (value, expected) in [
         (20.46, "20.46"),
         (26.07, "26.07"),
@@ -196,40 +196,6 @@ fn temperature_formatting_and_legacy_labels_are_unchanged() {
         let mut output = Output::default();
         write_fixed_2(&mut output, value).unwrap();
         assert_eq!(output.0, expected);
-    }
-    let mut output = Output::default();
-    write_temperature(&mut output, "SAMPLE_TEMP", 20.46).unwrap();
-    assert_eq!(output.0, "SAMPLE_TEMP 20.46\n");
-}
-
-#[test]
-fn legacy_commands_and_power_validation_are_unchanged() {
-    for (bytes, matches_command) in [
-        (
-            &b"i"[..],
-            matches!(parse_command(b"i"), Some(Command::Identity)),
-        ),
-        (
-            b"th",
-            matches!(parse_command(b"th"), Some(Command::HeaterTemperature)),
-        ),
-        (
-            b"ta",
-            matches!(parse_command(b"ta"), Some(Command::AmbientTemperature)),
-        ),
-        (b"p", matches!(parse_command(b"p"), Some(Command::GetPower))),
-        (b"r", matches!(parse_command(b"r"), Some(Command::Reset))),
-        (b"s", matches!(parse_command(b"s"), Some(Command::State))),
-    ] {
-        assert!(matches_command, "{bytes:?}");
-    }
-    assert!(matches!(parse_command(b"p0"), Some(Command::SetPower(0))));
-    assert!(matches!(
-        parse_command(b"p100"),
-        Some(Command::SetPower(100))
-    ));
-    for bytes in [&b"p101"[..], b"p-1", b"p1.5", b"p01"] {
-        assert!(parse_command(bytes).is_none());
     }
 }
 
@@ -1060,4 +1026,13 @@ fn designer_accepts_valid_physical_boundaries() {
         ("@319 ok\n".into(), true)
     );
     assert_same_plant(&plant, &ThermalPlant::new(staged).unwrap());
+}
+
+#[test]
+fn legacy_commands_are_rejected_without_mutation() {
+    let mut plant = ThermalPlant::new(SimulationConfig::default()).unwrap();
+    for command in ["i", "ts", "th", "tr", "ta", "p", "p50", "r", "s"] {
+        assert_eq!(reply(&mut plant, command.as_bytes()), "ERR\n");
+        assert_eq!(plant.power_percent(), 0.0);
+    }
 }

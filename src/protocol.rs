@@ -1,15 +1,3 @@
-pub enum Command {
-    Identity,
-    SampleTemperature,
-    HeaterTemperature,
-    RoomTemperature,
-    AmbientTemperature,
-    GetPower,
-    SetPower(u8),
-    Reset,
-    State,
-}
-
 pub(crate) fn parse_percent(bytes: &[u8]) -> Option<u8> {
     match bytes {
         [single @ b'0'..=b'9'] => Some(single - b'0'),
@@ -33,30 +21,6 @@ pub(crate) fn parse_u32(bytes: &[u8]) -> Option<u32> {
             .checked_add(u32::from(digit - b'0'))?;
     }
     Some(value)
-}
-
-pub fn parse_command(bytes: &[u8]) -> Option<Command> {
-    match bytes {
-        [b'i'] => Some(Command::Identity),
-
-        [b't', b's'] => Some(Command::SampleTemperature),
-
-        [b't', b'h'] => Some(Command::HeaterTemperature),
-
-        [b't', b'r'] => Some(Command::RoomTemperature),
-
-        [b't', b'a'] => Some(Command::AmbientTemperature),
-
-        [b'p'] => Some(Command::GetPower),
-
-        [b'p', percent @ ..] => parse_percent(percent).map(Command::SetPower),
-
-        [b'r'] => Some(Command::Reset),
-
-        [b's'] => Some(Command::State),
-
-        _ => None,
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -291,21 +255,6 @@ mod tests {
             parse(b"o 17  get sample_temp"),
             Err(ParseError { id: Some(17) })
         );
-    }
-
-    #[test]
-    fn legacy_protocol_still_parses() {
-        assert!(matches!(
-            parse_command(b"ts"),
-            Some(Command::SampleTemperature)
-        ));
-
-        assert!(matches!(
-            parse_command(b"tr"),
-            Some(Command::RoomTemperature)
-        ));
-
-        assert!(matches!(parse_command(b"p50"), Some(Command::SetPower(50))));
     }
 
     #[test]

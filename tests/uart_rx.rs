@@ -130,8 +130,6 @@ fn damaged_mutations_never_reach_handlers_and_next_command_works() {
         b"d 3 set seed 12345\n",
         b"d 4 apply\n",
         b"d 5 reset\n",
-        b"p50\n",
-        b"r\n",
     ] {
         for error_index in 0..command.len() {
             let mut active = SimulationConfig::default();

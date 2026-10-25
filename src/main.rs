@@ -18,9 +18,7 @@ use core::cell::Cell;
 use panic_halt as _;
 use thermal_plant_model::{SimulationConfig, ThermalPlant};
 
-use crate::protocol::{
-    Action, Command, Scope, parse, parse_command, parse_percent, parse_u32, token_eq,
-};
+use crate::protocol::{Action, Scope, parse, parse_percent, parse_u32, token_eq};
 
 #[cfg(not(test))]
 const MODEL_PERIOD_MS: u32 = 100;
@@ -53,17 +51,6 @@ fn TIMER0_COMPA() {
 #[cfg(not(test))]
 fn millis() -> u32 {
     avr_device::interrupt::free(|cs| MILLIS.borrow(cs).get())
-}
-
-fn write_temperature<W>(writer: &mut W, label: &str, value: f32) -> Result<(), W::Error>
-where
-    W: ufmt::uWrite + ?Sized,
-{
-    ufmt::uwrite!(writer, "{} ", label)?;
-
-    write_fixed_2(writer, value)?;
-
-    ufmt::uwriteln!(writer, "")
 }
 
 fn write_fixed_2<W>(writer: &mut W, value: f32) -> Result<(), W::Error>
@@ -341,103 +328,16 @@ fn main() -> ! {
                         discarding_command = false;
                         command_len = 0;
                     } else if command_len > 0 {
-                        if let Some(command) = parse_command(&command_buffer[..command_len]) {
-                            match command {
-                                Command::Identity => {
-                                    ufmt::uwriteln!(&mut serial, "ID THERMAL_PLANT 1")
-                                        .unwrap_infallible();
-                                }
-
-                                Command::SampleTemperature => {
-                                    write_temperature(
-                                        &mut serial,
-                                        "SAMPLE_TEMP",
-                                        plant.measured_temperatures().sample_temp,
-                                    )
-                                    .unwrap_infallible();
-                                }
-
-                                Command::HeaterTemperature => {
-                                    write_temperature(
-                                        &mut serial,
-                                        "HEATER_TEMP",
-                                        plant.measured_temperatures().heater_temp,
-                                    )
-                                    .unwrap_infallible();
-                                }
-
-                                Command::RoomTemperature => {
-                                    write_temperature(
-                                        &mut serial,
-                                        "ROOM_TEMP",
-                                        plant.measured_temperatures().room_temp,
-                                    )
-                                    .unwrap_infallible();
-                                }
-
-                                Command::AmbientTemperature => {
-                                    write_temperature(
-                                        &mut serial,
-                                        "AMBIENT_TEMP",
-                                        active_config.background_temp,
-                                    )
-                                    .unwrap_infallible();
-                                }
-
-                                Command::GetPower => {
-                                    let percent = libm::roundf(plant.power_percent()) as u8;
-                                    ufmt::uwriteln!(&mut serial, "POWER {}", percent)
-                                        .unwrap_infallible();
-                                }
-
-                                Command::SetPower(percent) => {
-                                    plant.set_power_percent(percent as f32).unwrap();
-                                    ufmt::uwriteln!(&mut serial, "OK").unwrap_infallible();
-                                }
-
-                                Command::Reset => {
-                                    plant = ThermalPlant::new(active_config).unwrap();
-
-                                    last_model_step = millis();
-
-                                    ufmt::uwriteln!(&mut serial, "OK").unwrap_infallible();
-                                }
-
-                                Command::State => {
-                                    let state = plant.measured_temperatures();
-
-                                    ufmt::uwrite!(&mut serial, "STATE ").unwrap_infallible();
-                                    write_fixed_2(&mut serial, state.heater_temp)
-                                        .unwrap_infallible();
-
-                                    ufmt::uwrite!(&mut serial, " ").unwrap_infallible();
-                                    write_fixed_2(&mut serial, state.sample_temp)
-                                        .unwrap_infallible();
-
-                                    ufmt::uwrite!(&mut serial, " ").unwrap_infallible();
-                                    write_fixed_2(&mut serial, active_config.background_temp)
-                                        .unwrap_infallible();
-
-                                    let percent = libm::roundf(plant.power_percent()) as u8;
-
-                                    ufmt::uwriteln!(&mut serial, " {}", percent)
-                                        .unwrap_infallible();
-                                }
-                            }
-                        } else if command_buffer[0] == b'o' || command_buffer[0] == b'd' {
-                            if handle_scoped_request(
-                                &mut serial,
-                                &command_buffer[..command_len],
-                                &mut plant,
-                                &mut active_config,
-                                &mut staged_config,
-                            )
-                            .unwrap_infallible()
-                            {
-                                last_model_step = millis();
-                            }
-                        } else {
-                            ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+                        if handle_scoped_request(
+                            &mut serial,
+                            &command_buffer[..command_len],
+                            &mut plant,
+                            &mut active_config,
+                            &mut staged_config,
+                        )
+                        .unwrap_infallible()
+                        {
+                            last_model_step = millis();
                         }
 
                         command_len = 0;
