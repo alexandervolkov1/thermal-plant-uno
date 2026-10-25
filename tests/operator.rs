@@ -160,7 +160,7 @@ fn errors_and_designer_requests_preserve_ids() {
     ] {
         assert_eq!(reply(&mut plant, request.as_bytes()), "ERR\n");
     }
-    for request in ["d 26 get unknown", "d 26 set heater.capacity 1"] {
+    for request in ["d 26 get unknown", "d 26 set heater.unknown 1"] {
         assert_eq!(reply(&mut plant, request.as_bytes()), "@26 err key\n");
     }
     assert_eq!(plant.power_percent(), 0.0);
@@ -297,16 +297,7 @@ fn designer_rejects_invalid_numbers_without_changing_configs() {
     let mut plant = ThermalPlant::new(active).unwrap();
     for key in ["room.capacity", "seed"] {
         for value in [
-            "-1",
-            "+1",
-            "1.5",
-            "1.0",
-            "1e3",
-            "NaN",
-            "inf",
-            "1x",
-            "4294967296",
-            "99999999999999999999",
+            "NaN", "inf", "1x", "1..0", "1e", "1e+", "1e-", "--1", "1,5", "1e100", "1e-100",
         ] {
             let request = std::format!("d 40 set {key} {value}");
             assert_eq!(
@@ -542,4 +533,346 @@ fn designer_reset_succeeds_after_rejected_apply() {
     assert_eq!(active.parameters.room_capacity, 350000.0);
     assert_eq!(staged.parameters.room_capacity, 350000.0);
     assert_same_plant(&plant, &ThermalPlant::new(active).unwrap());
+}
+
+#[test]
+fn designer_all_defaults_are_readable() {
+    let mut plant = ThermalPlant::new(SimulationConfig::default()).unwrap();
+    for (key, expected) in [
+        ("heater.capacity", 100.0),
+        ("sample.capacity", 200.0),
+        ("room.capacity", 300000.0),
+        ("coupling", 2.0),
+        ("heater.loss", 1.0),
+        ("sample.loss", 0.5),
+        ("room.loss", 20.0),
+        ("heater.radiation", 4e-10),
+        ("sample.radiation", 2e-10),
+        ("heater.max_power", 100.0),
+        ("initial.heater", 20.0),
+        ("initial.sample", 20.0),
+        ("initial.room", 20.0),
+        ("background.temp", 20.0),
+        ("parameter.spread", 0.0),
+        ("power.fluctuation", 0.0),
+        ("sensor.noise", 0.0),
+        ("sensor.drift", 0.0),
+    ] {
+        let request = std::format!("d 301 get {key}");
+        let response = reply(&mut plant, request.as_bytes());
+        assert!(response.starts_with("@301 ok "));
+        let value = response
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .parse::<f32>()
+            .unwrap();
+        assert_eq!(value, expected, "{key}");
+    }
+    assert_eq!(reply(&mut plant, b"d 302 get seed"), "@302 ok 1\n");
+}
+
+#[test]
+fn designer_sets_all_parameters_then_applies_and_resets() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    let mut control = ThermalPlant::new(active).unwrap();
+    plant.set_power_percent(75.0).unwrap();
+    control.set_power_percent(75.0).unwrap();
+    for _ in 0..100 {
+        plant.step();
+        control.step();
+    }
+    let values = [
+        ("heater.capacity", "111.25"),
+        ("sample.capacity", "222.5"),
+        ("room.capacity", "350000.5"),
+        ("coupling", "3.25"),
+        ("heater.loss", "0.75"),
+        ("sample.loss", "0.625"),
+        ("room.loss", "22.5"),
+        ("heater.radiation", "4e-10"),
+        ("sample.radiation", "2.5e-7"),
+        ("heater.max_power", "125.5"),
+        ("initial.heater", "-10.75"),
+        ("initial.sample", "20.25"),
+        ("initial.room", "18.5"),
+        ("background.temp", "17.25"),
+        ("parameter.spread", "0.03"),
+        ("power.fluctuation", "0.04"),
+        ("sensor.noise", "0.5"),
+        ("sensor.drift", "0.25"),
+        ("seed", "12345"),
+    ];
+    for (key, text) in values {
+        let request = std::format!("d 303 set {key} {text}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@303 ok\n".into(), false)
+        );
+        assert_same_plant(&plant, &control);
+    }
+    for (key, text) in values {
+        let request = std::format!("d 304 get {key}");
+        let (response, restarted) =
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes());
+        assert!(!restarted);
+        assert!(response.starts_with("@304 ok "));
+        assert_eq!(
+            response
+                .split_whitespace()
+                .nth(2)
+                .unwrap()
+                .parse::<f32>()
+                .unwrap(),
+            text.parse::<f32>().unwrap(),
+            "{key}"
+        );
+        // Every complete round-trip request fits the unchanged UART buffer.
+        assert!(
+            std::format!(
+                "d 65535 set {key} {}",
+                response.split_whitespace().nth(2).unwrap()
+            )
+            .len()
+                <= 64
+        );
+    }
+    let mut expected = SimulationConfig::default();
+    expected.parameters.heater_capacity = 111.25;
+    expected.parameters.sample_capacity = 222.5;
+    expected.parameters.room_capacity = 350000.5;
+    expected.parameters.coupling = 3.25;
+    expected.parameters.heater_loss = 0.75;
+    expected.parameters.sample_loss = 0.625;
+    expected.parameters.room_loss = 22.5;
+    expected.parameters.heater_radiation = 4e-10;
+    expected.parameters.sample_radiation = 2.5e-7;
+    expected.parameters.max_heater_power = 125.5;
+    expected.initial_state.heater_temp = -10.75;
+    expected.initial_state.sample_temp = 20.25;
+    expected.initial_state.room_temp = 18.5;
+    expected.background_temp = 17.25;
+    expected.parameter_spread = 0.03;
+    expected.heater_power_fluctuation = 0.04;
+    expected.sensor_noise = 0.5;
+    expected.sensor_drift_amplitude = 0.25;
+    expected.seed = 12345;
+    assert_eq!(active.parameters.room_capacity, 300000.0);
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 305 apply"),
+        ("@305 ok\n".into(), true)
+    );
+    let mut control = ThermalPlant::new(expected).unwrap();
+    assert_same_plant(&plant, &control);
+    plant.set_power_percent(75.0).unwrap();
+    control.set_power_percent(75.0).unwrap();
+    for _ in 0..100 {
+        plant.step();
+        control.step();
+        assert_same_plant(&plant, &control);
+    }
+    for (key, _) in values {
+        let request = std::format!("d 306 set {key} 0");
+        assert!(!scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()).1);
+    }
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 307 reset"),
+        ("@307 ok\n".into(), true)
+    );
+    assert_same_plant(&plant, &ThermalPlant::new(expected).unwrap());
+    for (key, text) in values {
+        let request = std::format!("d 308 get {key}");
+        let (response, _) = scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes());
+        assert_eq!(
+            response
+                .split_whitespace()
+                .nth(2)
+                .unwrap()
+                .parse::<f32>()
+                .unwrap(),
+            text.parse::<f32>().unwrap(),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn designer_physical_rules_are_enforced_only_on_apply() {
+    for (key, value) in [
+        ("heater.capacity", "0"),
+        ("sample.capacity", "-1"),
+        ("room.capacity", "0"),
+        ("coupling", "-0.1"),
+        ("heater.loss", "-1"),
+        ("sample.loss", "-1"),
+        ("room.loss", "-1"),
+        ("heater.radiation", "-4e-10"),
+        ("sample.radiation", "-2e-10"),
+        ("heater.max_power", "0"),
+        ("initial.heater", "-273.15"),
+        ("initial.sample", "-300"),
+        ("initial.room", "-300"),
+        ("background.temp", "-300"),
+        ("parameter.spread", "0.11"),
+        ("parameter.spread", "-0.01"),
+        ("power.fluctuation", "0.11"),
+        ("power.fluctuation", "-0.01"),
+        ("sensor.noise", "2.001"),
+        ("sensor.noise", "-0.01"),
+        ("sensor.drift", "1.001"),
+        ("sensor.drift", "-0.01"),
+    ] {
+        let mut active = SimulationConfig::default();
+        let mut staged = active;
+        let mut plant = ThermalPlant::new(active).unwrap();
+        let mut control = ThermalPlant::new(active).unwrap();
+        plant.set_power_percent(75.0).unwrap();
+        control.set_power_percent(75.0).unwrap();
+        for _ in 0..100 {
+            plant.step();
+            control.step();
+        }
+        let request = std::format!("d 310 set {key} {value}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@310 ok\n".into(), false),
+            "{key}"
+        );
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, b"d 311 apply"),
+            ("@311 err config\n".into(), false),
+            "{key}"
+        );
+        assert_same_plant(&plant, &control);
+        for _ in 0..10 {
+            plant.step();
+            control.step();
+            assert_same_plant(&plant, &control);
+        }
+        let request = std::format!("d 312 get {key}");
+        let (response, _) = scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes());
+        assert_eq!(
+            response
+                .split_whitespace()
+                .nth(2)
+                .unwrap()
+                .parse::<f32>()
+                .unwrap(),
+            value.parse::<f32>().unwrap()
+        );
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, b"d 313 reset"),
+            ("@313 ok\n".into(), true)
+        );
+        assert_same_plant(
+            &plant,
+            &ThermalPlant::new(SimulationConfig::default()).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn designer_all_float_keys_reject_bad_input_and_near_misses() {
+    let keys = [
+        "heater.capacity",
+        "sample.capacity",
+        "room.capacity",
+        "coupling",
+        "heater.loss",
+        "sample.loss",
+        "room.loss",
+        "heater.radiation",
+        "sample.radiation",
+        "heater.max_power",
+        "initial.heater",
+        "initial.sample",
+        "initial.room",
+        "background.temp",
+        "parameter.spread",
+        "power.fluctuation",
+        "sensor.noise",
+        "sensor.drift",
+    ];
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    for key in keys {
+        let request = std::format!("d 314 get {key}");
+        let original = scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()).0;
+        for value in [
+            "abc", "NaN", "Inf", "Infinity", "1e100", "1e-100", "1e+", "1,5", "--1",
+        ] {
+            let request = std::format!("d 315 set {key} {value}");
+            assert_eq!(
+                scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+                ("@315 err value\n".into(), false),
+                "{key}: {value}"
+            );
+        }
+        let request = std::format!("d 314 get {key}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()).0,
+            original
+        );
+        let mut miss = key.as_bytes().to_vec();
+        *miss.last_mut().unwrap() = b'z';
+        let miss = std::string::String::from_utf8(miss).unwrap();
+        for request in [
+            std::format!("d 316 get {miss}"),
+            std::format!("d 316 set {miss} 1"),
+        ] {
+            assert_eq!(
+                scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+                ("@316 err key\n".into(), false)
+            );
+        }
+    }
+    for value in ["-1", "+1", "1.5", "1e3", "4294967296"] {
+        let request = std::format!("d 317 set seed {value}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@317 err value\n".into(), false)
+        );
+    }
+}
+
+#[test]
+fn designer_accepts_valid_physical_boundaries() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    for (key, value) in [
+        ("heater.capacity", "1"),
+        ("sample.capacity", "1"),
+        ("room.capacity", "1.5"),
+        ("coupling", "0"),
+        ("heater.loss", "0"),
+        ("sample.loss", "0"),
+        ("room.loss", "0"),
+        ("heater.radiation", "0"),
+        ("sample.radiation", "0"),
+        ("heater.max_power", "1"),
+        ("initial.heater", "-273.14"),
+        ("initial.sample", "-273.14"),
+        ("initial.room", "-273.14"),
+        ("background.temp", "-273.14"),
+        ("parameter.spread", "0.1"),
+        ("power.fluctuation", "0.1"),
+        ("sensor.noise", "2"),
+        ("sensor.drift", "1"),
+        ("seed", "0"),
+    ] {
+        let request = std::format!("d 318 set {key} {value}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@318 ok\n".into(), false)
+        );
+    }
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 319 apply"),
+        ("@319 ok\n".into(), true)
+    );
+    assert_same_plant(&plant, &ThermalPlant::new(staged).unwrap());
 }
