@@ -106,8 +106,8 @@ pub fn parse(bytes: &[u8]) -> Result<Request<'_>, ParseError> {
     let mut fields = bytes.split(|byte| *byte == b' ');
 
     let scope = match fields.next() {
-        Some(value) if value == b"o" => Scope::Operator,
-        Some(value) if value == b"d" => Scope::Designer,
+        Some(value) if token_eq(value, b"o") => Scope::Operator,
+        Some(value) if token_eq(value, b"d") => Scope::Designer,
         _ => return Err(ParseError { id: None }),
     };
 
@@ -120,7 +120,7 @@ pub fn parse(bytes: &[u8]) -> Result<Request<'_>, ParseError> {
 
     let verb = fields.next().ok_or(syntax_error)?;
 
-    let action = if verb == b"get" {
+    let action = if token_eq(verb, b"get") {
         let key = fields.next().ok_or(syntax_error)?;
 
         if key.is_empty() || fields.next().is_some() {
@@ -128,7 +128,7 @@ pub fn parse(bytes: &[u8]) -> Result<Request<'_>, ParseError> {
         }
 
         Action::Get(key)
-    } else if verb == b"set" {
+    } else if token_eq(verb, b"set") {
         let key = fields.next().ok_or(syntax_error)?;
         let value = fields.next().ok_or(syntax_error)?;
 
@@ -137,9 +137,9 @@ pub fn parse(bytes: &[u8]) -> Result<Request<'_>, ParseError> {
         }
 
         Action::Set { key, value }
-    } else if verb == b"apply" && scope == Scope::Designer && fields.next().is_none() {
+    } else if token_eq(verb, b"apply") && scope == Scope::Designer && fields.next().is_none() {
         Action::Apply
-    } else if verb == b"reset" && scope == Scope::Designer && fields.next().is_none() {
+    } else if token_eq(verb, b"reset") && scope == Scope::Designer && fields.next().is_none() {
         Action::Reset
     } else {
         return Err(syntax_error);
@@ -148,9 +148,74 @@ pub fn parse(bytes: &[u8]) -> Result<Request<'_>, ParseError> {
     Ok(Request { id, scope, action })
 }
 
+#[inline(never)]
+pub(crate) fn token_eq(input: &[u8], expected: &[u8]) -> bool {
+    if input.len() != expected.len() {
+        return false;
+    }
+
+    let mut difference = 0u8;
+    let mut i = 0;
+
+    while i < input.len() {
+        difference |= input[i] ^ expected[i];
+        i += 1;
+    }
+
+    difference == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_equality_checks_every_byte_and_length() {
+        for token in [
+            &b"o"[..],
+            b"d",
+            b"get",
+            b"set",
+            b"apply",
+            b"reset",
+            b"power",
+            b"device",
+            b"t.sample",
+            b"t.heater",
+            b"t.room",
+            b"room.capacity",
+            b"seed",
+        ] {
+            assert!(token_eq(token, token));
+            assert!(!token_eq(&token[..token.len() - 1], token));
+            let mut longer = token.to_vec();
+            longer.push(b'x');
+            assert!(!token_eq(&longer, token));
+            for index in 0..token.len() {
+                for byte in 0..=u8::MAX {
+                    let mut changed = token.to_vec();
+                    changed[index] = byte;
+                    assert_eq!(token_eq(&changed, token), byte == token[index]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parser_distinguishes_designer_verbs_and_rejects_near_misses() {
+        assert_eq!(parse(b"d 102 apply").unwrap().action, Action::Apply);
+        assert_eq!(parse(b"d 102 reset").unwrap().action, Action::Reset);
+        for token in ["applx", "applz", "xxxxx", "abcde", "resetx", "applyx"] {
+            let request = std::format!("d 107 {token}");
+            assert_eq!(parse(request.as_bytes()), Err(ParseError { id: Some(107) }));
+        }
+        for request in [&b"d 108 gex seed"[..], b"d 108 sez seed 1"] {
+            assert_eq!(parse(request), Err(ParseError { id: Some(108) }));
+        }
+        for request in [&b"x 108 get seed"[..], b"oo 108 get power"] {
+            assert_eq!(parse(request), Err(ParseError { id: None }));
+        }
+    }
 
     #[test]
     fn parses_operator_requests() {

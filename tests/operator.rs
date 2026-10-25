@@ -49,6 +49,50 @@ fn operator_identity_and_power() {
 }
 
 #[test]
+fn unknown_tokens_do_not_change_power_or_configuration() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    plant.set_power_percent(75.0).unwrap();
+    for scope in ["o", "d"] {
+        for key in [
+            "poweq",
+            "powez",
+            "zzzzz",
+            "devicz",
+            "t.samplz",
+            "t.heatez",
+            "t.rooz",
+            "room.capacitx",
+            "seez",
+            "debug.active.capacity",
+        ] {
+            for operation in ["get", "set"] {
+                let value = if operation == "set" { " 50" } else { "" };
+                let request = std::format!("{scope} 109 {operation} {key}{value}");
+                assert_eq!(
+                    scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+                    ("@109 err key\n".into(), false)
+                );
+                assert_eq!(plant.power_percent(), 75.0);
+                assert_eq!(active.parameters.room_capacity, 300000.0);
+                assert_eq!(staged.parameters.room_capacity, 300000.0);
+                assert_eq!(active.seed, 1);
+                assert_eq!(staged.seed, 1);
+            }
+        }
+    }
+    for token in ["applx", "applz", "xxxxx", "abcde", "resetx", "applyx"] {
+        let request = std::format!("d 110 {token}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@110 err syntax\n".into(), false)
+        );
+        assert_eq!(plant.power_percent(), 75.0);
+    }
+}
+
+#[test]
 fn malformed_power_preserves_previous_setting() {
     let mut plant = ThermalPlant::new(SimulationConfig::default()).unwrap();
     plant.set_power_percent(50.0).unwrap();

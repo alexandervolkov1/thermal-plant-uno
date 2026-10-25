@@ -16,7 +16,9 @@ use core::cell::Cell;
 use panic_halt as _;
 use thermal_plant_model::{SimulationConfig, ThermalPlant};
 
-use crate::protocol::{Action, Command, Scope, parse, parse_command, parse_percent, parse_u32};
+use crate::protocol::{
+    Action, Command, Scope, parse, parse_command, parse_percent, parse_u32, token_eq,
+};
 
 #[cfg(not(test))]
 const MODEL_PERIOD_MS: u32 = 100;
@@ -104,28 +106,28 @@ where
     W: ufmt::uWrite + ?Sized,
 {
     match action {
-        Action::Get(key) if key == b"t.sample" => {
+        Action::Get(key) if token_eq(key, b"t.sample") => {
             write_reply_temperature(writer, id, plant.measured_temperatures().sample_temp)
         }
 
-        Action::Get(key) if key == b"t.heater" => {
+        Action::Get(key) if token_eq(key, b"t.heater") => {
             write_reply_temperature(writer, id, plant.measured_temperatures().heater_temp)
         }
 
-        Action::Get(key) if key == b"t.room" => {
+        Action::Get(key) if token_eq(key, b"t.room") => {
             write_reply_temperature(writer, id, plant.measured_temperatures().room_temp)
         }
 
-        Action::Get(key) if key == b"power" => {
+        Action::Get(key) if token_eq(key, b"power") => {
             let percent = libm::roundf(plant.power_percent()) as u8;
             ufmt::uwriteln!(writer, "@{} ok {}", id, percent)
         }
 
-        Action::Get(key) if key == b"device" => {
+        Action::Get(key) if token_eq(key, b"device") => {
             ufmt::uwriteln!(writer, "@{} ok THERMAL_PLANT 2", id)
         }
 
-        Action::Set { key, value } if key == b"power" => match parse_percent(value) {
+        Action::Set { key, value } if token_eq(key, b"power") => match parse_percent(value) {
             Some(percent) => {
                 if plant.set_power_percent(percent as f32).is_ok() {
                     ufmt::uwriteln!(writer, "@{} ok", id)
@@ -158,7 +160,7 @@ where
     W: ufmt::uWrite + ?Sized,
 {
     match action {
-        Action::Get(key) if key == b"room.capacity" => {
+        Action::Get(key) if token_eq(key, b"room.capacity") => {
             ufmt::uwriteln!(
                 writer,
                 "@{} ok {}",
@@ -166,10 +168,10 @@ where
                 staged_config.parameters.room_capacity as u32
             )?;
         }
-        Action::Get(key) if key == b"seed" => {
+        Action::Get(key) if token_eq(key, b"seed") => {
             ufmt::uwriteln!(writer, "@{} ok {}", id, staged_config.seed)?;
         }
-        Action::Set { key, value } if key == b"room.capacity" || key == b"seed" => {
+        Action::Set { key, value } if token_eq(key, b"room.capacity") || token_eq(key, b"seed") => {
             let value = match parse_u32(value) {
                 Some(value) => value,
                 None => {
@@ -177,7 +179,7 @@ where
                     return Ok(false);
                 }
             };
-            if key == b"seed" {
+            if token_eq(key, b"seed") {
                 staged_config.seed = value;
             } else {
                 let capacity = value as f32;
