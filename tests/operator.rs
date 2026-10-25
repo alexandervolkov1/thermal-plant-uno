@@ -452,3 +452,50 @@ fn designer_apply_validates_the_entire_staged_configuration() {
     assert_eq!(active.parameters.heater_capacity, 100.0);
     assert_eq!(staged.parameters.heater_capacity, 0.0);
 }
+
+#[test]
+fn designer_reset_discards_valid_pending_capacity_after_apply() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    for (request, response, restarted) in [
+        ("d 62 set room.capacity 350000", "@62 ok\n", false),
+        ("d 63 apply", "@63 ok\n", true),
+        ("d 64 set room.capacity 400000", "@64 ok\n", false),
+        ("d 65 get room.capacity", "@65 ok 400000\n", false),
+        ("d 66 reset", "@66 ok\n", true),
+        ("d 67 get room.capacity", "@67 ok 350000\n", false),
+    ] {
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            (response.into(), restarted)
+        );
+    }
+    assert_eq!(active.parameters.room_capacity, 350000.0);
+    assert_eq!(staged.parameters.room_capacity, 350000.0);
+    assert_same_plant(&plant, &ThermalPlant::new(active).unwrap());
+}
+
+#[test]
+fn designer_reset_succeeds_after_rejected_apply() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    for (request, response, restarted) in [
+        ("d 62 set room.capacity 350000", "@62 ok\n", false),
+        ("d 63 apply", "@63 ok\n", true),
+        ("d 69 set room.capacity 0", "@69 ok\n", false),
+        ("d 70 apply", "@70 err config\n", false),
+        ("d 71 get room.capacity", "@71 ok 0\n", false),
+        ("d 73 reset", "@73 ok\n", true),
+        ("d 74 get room.capacity", "@74 ok 350000\n", false),
+    ] {
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            (response.into(), restarted)
+        );
+    }
+    assert_eq!(active.parameters.room_capacity, 350000.0);
+    assert_eq!(staged.parameters.room_capacity, 350000.0);
+    assert_same_plant(&plant, &ThermalPlant::new(active).unwrap());
+}

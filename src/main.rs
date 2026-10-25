@@ -194,24 +194,24 @@ where
         Action::Get(_) | Action::Set { .. } => {
             ufmt::uwriteln!(writer, "@{} err key", id)?;
         }
-        Action::Apply | Action::Reset => {
-            let config = if matches!(action, Action::Apply) {
-                *staged_config
-            } else {
-                *active_config
-            };
-            let replacement = config.validate().and_then(|()| ThermalPlant::new(config));
-            match replacement {
-                Ok(replacement) => {
-                    *plant = replacement;
-                    *active_config = config;
-                    *staged_config = config;
-                    ufmt::uwriteln!(writer, "@{} ok", id)?;
-                    return Ok(true);
-                }
-                Err(_) => ufmt::uwriteln!(writer, "@{} err config", id)?,
+        Action::Apply => match ThermalPlant::new(*staged_config) {
+            Ok(replacement) => {
+                *plant = replacement;
+                *active_config = *staged_config;
+                ufmt::uwriteln!(writer, "@{} ok", id)?;
+                return Ok(true);
             }
-        }
+            Err(_) => ufmt::uwriteln!(writer, "@{} err config", id)?,
+        },
+        Action::Reset => match ThermalPlant::new(*active_config) {
+            Ok(replacement) => {
+                *plant = replacement;
+                *staged_config = *active_config;
+                ufmt::uwriteln!(writer, "@{} ok", id)?;
+                return Ok(true);
+            }
+            Err(_) => ufmt::uwriteln!(writer, "@{} err config", id)?,
+        },
     }
     Ok(false)
 }
