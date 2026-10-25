@@ -19,6 +19,22 @@ pub(crate) fn parse_percent(bytes: &[u8]) -> Option<u8> {
     }
 }
 
+pub(crate) fn parse_u32(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value = 0u32;
+    for &digit in bytes {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = value
+            .checked_mul(10)?
+            .checked_add(u32::from(digit - b'0'))?;
+    }
+    Some(value)
+}
+
 pub fn parse_command(bytes: &[u8]) -> Option<Command> {
     match bytes {
         [b'i'] => Some(Command::Identity),

@@ -13,9 +13,21 @@ impl ufmt::uWrite for Output {
 }
 
 fn reply(plant: &mut ThermalPlant, bytes: &[u8]) -> std::string::String {
+    let mut active_config = SimulationConfig::default();
+    let mut staged_config = active_config;
+    scoped_reply(plant, &mut active_config, &mut staged_config, bytes).0
+}
+
+fn scoped_reply(
+    plant: &mut ThermalPlant,
+    active_config: &mut SimulationConfig,
+    staged_config: &mut SimulationConfig,
+    bytes: &[u8],
+) -> (std::string::String, bool) {
     let mut output = Output::default();
-    handle_scoped_request(&mut output, bytes, plant).unwrap();
-    output.0
+    let restarted =
+        handle_scoped_request(&mut output, bytes, plant, active_config, staged_config).unwrap();
+    (output.0, restarted)
 }
 
 #[test]
@@ -104,16 +116,8 @@ fn errors_and_designer_requests_preserve_ids() {
     ] {
         assert_eq!(reply(&mut plant, request.as_bytes()), "ERR\n");
     }
-    for request in [
-        "d 26 get seed",
-        "d 26 set seed 1",
-        "d 26 apply",
-        "d 26 reset",
-    ] {
-        assert_eq!(
-            reply(&mut plant, request.as_bytes()),
-            "@26 err unsupported\n"
-        );
+    for request in ["d 26 get unknown", "d 26 set heater.capacity 1"] {
+        assert_eq!(reply(&mut plant, request.as_bytes()), "@26 err key\n");
     }
     assert_eq!(plant.power_percent(), 0.0);
 }
@@ -183,4 +187,268 @@ fn legacy_commands_and_power_validation_are_unchanged() {
     for bytes in [&b"p101"[..], b"p-1", b"p1.5", b"p01"] {
         assert!(parse_command(bytes).is_none());
     }
+}
+
+fn assert_same_plant(actual: &ThermalPlant, expected: &ThermalPlant) {
+    for (actual, expected) in [
+        (actual.temperatures(), expected.temperatures()),
+        (
+            actual.measured_temperatures(),
+            expected.measured_temperatures(),
+        ),
+    ] {
+        assert_eq!(actual.heater_temp, expected.heater_temp);
+        assert_eq!(actual.sample_temp, expected.sample_temp);
+        assert_eq!(actual.room_temp, expected.room_temp);
+    }
+    assert_eq!(actual.power_percent(), expected.power_percent());
+}
+
+#[test]
+fn designer_stages_both_keys_without_changing_running_plant() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    let mut control = ThermalPlant::new(active).unwrap();
+    plant.set_power_percent(75.0).unwrap();
+    control.set_power_percent(75.0).unwrap();
+    for _ in 0..100 {
+        plant.step();
+        control.step();
+    }
+    for (request, response) in [
+        ("d 30 get room.capacity", "@30 ok 300000\n"),
+        ("d 31 set room.capacity 350000", "@31 ok\n"),
+        ("d 32 get room.capacity", "@32 ok 350000\n"),
+        ("d 33 set seed 12345", "@33 ok\n"),
+        ("d 65535 get seed", "@65535 ok 12345\n"),
+        ("d 36 get unknown", "@36 err key\n"),
+        ("d 37 set unknown 1", "@37 err key\n"),
+        ("d 38 get seed extra", "@38 err syntax\n"),
+        ("o 39 get power", "@39 ok 75\n"),
+    ] {
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            (response.into(), false)
+        );
+        assert_eq!(active.parameters.room_capacity, 300000.0);
+        assert_eq!(active.seed, 1);
+        assert_same_plant(&plant, &control);
+    }
+    assert_eq!(staged.parameters.room_capacity, 350000.0);
+    assert_eq!(staged.seed, 12345);
+    for _ in 0..100 {
+        plant.step();
+        control.step();
+        assert_same_plant(&plant, &control);
+    }
+}
+
+#[test]
+fn designer_rejects_invalid_numbers_without_changing_configs() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    staged.parameters.room_capacity = 350000.0;
+    staged.seed = 12345;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    for key in ["room.capacity", "seed"] {
+        for value in [
+            "-1",
+            "+1",
+            "1.5",
+            "1.0",
+            "1e3",
+            "NaN",
+            "inf",
+            "1x",
+            "4294967296",
+            "99999999999999999999",
+        ] {
+            let request = std::format!("d 40 set {key} {value}");
+            assert_eq!(
+                scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+                ("@40 err value\n".into(), false)
+            );
+            assert_eq!(staged.parameters.room_capacity, 350000.0);
+            assert_eq!(staged.seed, 12345);
+            assert_eq!(active.parameters.room_capacity, 300000.0);
+            assert_eq!(active.seed, 1);
+        }
+    }
+    for value in ["16777217", "4294967295"] {
+        let request = std::format!("d 41 set room.capacity {value}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@41 err value\n".into(), false)
+        );
+        assert_eq!(staged.parameters.room_capacity, 350000.0);
+    }
+    // Empty values are rejected by the existing request parser.
+    for request in ["d 42 set seed ", "d 42 set room.capacity"] {
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@42 err syntax\n".into(), false)
+        );
+    }
+    assert_eq!(staged.seed, 12345);
+    assert_eq!(staged.parameters.room_capacity, 350000.0);
+}
+
+#[test]
+fn designer_integer_boundaries_round_trip_exactly() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    for (key, values) in [
+        ("seed", &[0u32, 1, u32::MAX][..]),
+        (
+            "room.capacity",
+            &[0u32, 1, 16777216, 16777218, 4294967040][..],
+        ),
+    ] {
+        for value in values {
+            let request = std::format!("d 43 set {key} {value}");
+            assert_eq!(
+                scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+                ("@43 ok\n".into(), false)
+            );
+            let request = std::format!("d 44 get {key}");
+            assert_eq!(
+                scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+                (std::format!("@44 ok {value}\n"), false)
+            );
+        }
+    }
+    assert_eq!(active.seed, 1);
+    assert_eq!(active.parameters.room_capacity, 300000.0);
+}
+
+#[test]
+fn designer_apply_replaces_plant_and_reset_reproduces_active_configuration() {
+    let mut active = SimulationConfig::default();
+    // Exercise seeded behavior without adding any further Designer keys.
+    active.sensor_noise = 1.0;
+    active.sensor_drift_amplitude = 0.5;
+    active.parameter_spread = 0.05;
+    active.heater_power_fluctuation = 0.05;
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    plant.set_power_percent(75.0).unwrap();
+    for _ in 0..100 {
+        plant.step();
+    }
+    for request in [
+        b"d 31 set room.capacity 350000".as_slice(),
+        b"d 33 set seed 12345",
+    ] {
+        assert!(!scoped_reply(&mut plant, &mut active, &mut staged, request).1);
+    }
+    let expected_config = staged;
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 34 apply"),
+        ("@34 ok\n".into(), true)
+    );
+    assert_eq!(active.parameters.room_capacity, 350000.0);
+    assert_eq!(active.seed, 12345);
+    let mut expected = ThermalPlant::new(expected_config).unwrap();
+    assert_same_plant(&plant, &expected);
+    plant.set_power_percent(75.0).unwrap();
+    expected.set_power_percent(75.0).unwrap();
+    for _ in 0..150 {
+        plant.step();
+        expected.step();
+        assert_same_plant(&plant, &expected);
+    }
+    // Pending invalid physical values must be discarded by reset.
+    for request in [b"d 45 set room.capacity 0".as_slice(), b"d 46 set seed 999"] {
+        assert!(!scoped_reply(&mut plant, &mut active, &mut staged, request).1);
+    }
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 35 reset"),
+        ("@35 ok\n".into(), true)
+    );
+    assert_eq!(staged.parameters.room_capacity, 350000.0);
+    assert_eq!(staged.seed, 12345);
+    assert_eq!(active.parameters.room_capacity, 350000.0);
+    assert_eq!(active.seed, 12345);
+    let mut expected = ThermalPlant::new(expected_config).unwrap();
+    assert_same_plant(&plant, &expected);
+    plant.set_power_percent(75.0).unwrap();
+    expected.set_power_percent(75.0).unwrap();
+    for _ in 0..150 {
+        plant.step();
+        expected.step();
+        assert_same_plant(&plant, &expected);
+    }
+}
+
+#[test]
+fn designer_failed_apply_preserves_running_plant_and_pending_values() {
+    let mut active = SimulationConfig::default();
+    active.sensor_noise = 1.0;
+    active.sensor_drift_amplitude = 0.5;
+    active.heater_power_fluctuation = 0.05;
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    let mut control = ThermalPlant::new(active).unwrap();
+    plant.set_power_percent(75.0).unwrap();
+    control.set_power_percent(75.0).unwrap();
+    for _ in 0..100 {
+        plant.step();
+        control.step();
+    }
+    for (request, response) in [
+        ("d 47 set room.capacity 0", "@47 ok\n"),
+        ("d 48 set seed 12345", "@48 ok\n"),
+        ("d 49 apply", "@49 err config\n"),
+        ("d 50 get room.capacity", "@50 ok 0\n"),
+        ("d 51 get seed", "@51 ok 12345\n"),
+        ("o 52 get power", "@52 ok 75\n"),
+    ] {
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            (response.into(), false)
+        );
+        assert_same_plant(&plant, &control);
+        assert_eq!(active.parameters.room_capacity, 300000.0);
+        assert_eq!(active.seed, 1);
+    }
+    // Continued equality checks that failed apply also leaves random state intact.
+    for _ in 0..150 {
+        plant.step();
+        control.step();
+        assert_same_plant(&plant, &control);
+    }
+    assert_eq!(staged.parameters.room_capacity, 0.0);
+    assert_eq!(staged.seed, 12345);
+    assert_eq!(
+        scoped_reply(
+            &mut plant,
+            &mut active,
+            &mut staged,
+            b"d 53 set room.capacity 350000"
+        ),
+        ("@53 ok\n".into(), false)
+    );
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 54 apply"),
+        ("@54 ok\n".into(), true)
+    );
+    assert_same_plant(&plant, &ThermalPlant::new(staged).unwrap());
+}
+
+#[test]
+fn designer_apply_validates_the_entire_staged_configuration() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    staged.parameters.heater_capacity = 0.0;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    let control = ThermalPlant::new(active).unwrap();
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 55 apply"),
+        ("@55 err config\n".into(), false)
+    );
+    assert_same_plant(&plant, &control);
+    assert_eq!(active.parameters.heater_capacity, 100.0);
+    assert_eq!(staged.parameters.heater_capacity, 0.0);
 }
