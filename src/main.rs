@@ -4,6 +4,7 @@
 
 mod decimal;
 mod protocol;
+mod uart_rx;
 
 #[cfg(test)]
 #[path = "../tests/operator.rs"]
@@ -311,6 +312,7 @@ fn main() -> ! {
     let pins = arduino_hal::pins!(dp);
 
     let mut serial = arduino_hal::default_serial!(dp, pins, 57600);
+    uart_rx::init();
 
     millis_init(dp.TC0);
 
@@ -330,8 +332,8 @@ fn main() -> ! {
     let mut discarding_command = false;
 
     loop {
-        match serial.read() {
-            Ok(value) => {
+        match uart_rx::pop() {
+            Some(Ok(value)) => {
                 if value == b'\r' || value == b'\n' {
                     if discarding_command {
                         write_syntax_error(&mut serial, &command_buffer[..command_len])
@@ -448,8 +450,12 @@ fn main() -> ! {
                     discarding_command = true;
                 }
             }
-            Err(nb::Error::WouldBlock) => {}
-            Err(nb::Error::Other(_)) => panic!(),
+            Some(Err(())) => {
+                command_len = 0;
+                discarding_command = false;
+                ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+            }
+            None => {}
         }
 
         let now = millis();
