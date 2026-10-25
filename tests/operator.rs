@@ -454,6 +454,96 @@ fn room_capacity_integer_form_preserves_stage2_contract() {
 }
 
 #[test]
+fn room_capacity_set_get_set_get_preserves_signed_integer_bits() {
+    let mut active = SimulationConfig::default();
+    let mut staged = active;
+    let mut plant = ThermalPlant::new(active).unwrap();
+    let mut control = ThermalPlant::new(active).unwrap();
+    plant.set_power_percent(75.0).unwrap();
+    control.set_power_percent(75.0).unwrap();
+    for _ in 0..20 {
+        plant.step();
+        control.step();
+    }
+    for (input, expected_text) in [
+        ("-0.0", Some("-0.0")),
+        ("-1.0", Some("-1.0")),
+        ("-350000.0", Some("-350000.0")),
+        ("-4294967040.0", Some("-4294967040.0")),
+        ("0", Some("0")),
+        ("350000", Some("350000")),
+        ("350000.5", None),
+    ] {
+        let expected_bits = input.parse::<f32>().unwrap().to_bits();
+        let request = std::format!("d 401 set room.capacity {input}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@401 ok\n".into(), false)
+        );
+        assert_eq!(staged.parameters.room_capacity.to_bits(), expected_bits);
+        let (first, restarted) = scoped_reply(
+            &mut plant,
+            &mut active,
+            &mut staged,
+            b"d 402 get room.capacity",
+        );
+        assert!(!restarted);
+        assert!(first.starts_with("@402 ok "));
+        let text = first.split_whitespace().nth(2).unwrap();
+        if let Some(expected_text) = expected_text {
+            assert_eq!(text, expected_text);
+        }
+        assert_eq!(text.parse::<f32>().unwrap().to_bits(), expected_bits);
+        let request = std::format!("d 403 set room.capacity {text}");
+        assert_eq!(
+            scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+            ("@403 ok\n".into(), false)
+        );
+        assert_eq!(staged.parameters.room_capacity.to_bits(), expected_bits);
+        let (second, restarted) = scoped_reply(
+            &mut plant,
+            &mut active,
+            &mut staged,
+            b"d 404 get room.capacity",
+        );
+        assert!(!restarted);
+        assert!(second.starts_with("@404 ok "));
+        let second_text = second.split_whitespace().nth(2).unwrap();
+        assert_eq!(second_text, text);
+        assert_eq!(second_text.parse::<f32>().unwrap().to_bits(), expected_bits);
+        for invalid in ["-1", "+1"] {
+            let request = std::format!("d 405 set room.capacity {invalid}");
+            assert_eq!(
+                scoped_reply(&mut plant, &mut active, &mut staged, request.as_bytes()),
+                ("@405 err value\n".into(), false)
+            );
+            assert_eq!(staged.parameters.room_capacity.to_bits(), expected_bits);
+            assert_eq!(
+                active.parameters.room_capacity.to_bits(),
+                300000.0f32.to_bits()
+            );
+            assert_same_plant(&plant, &control);
+        }
+        if input.parse::<f32>().unwrap() <= 0.0 {
+            assert_eq!(
+                scoped_reply(&mut plant, &mut active, &mut staged, b"d 406 apply"),
+                ("@406 err config\n".into(), false)
+            );
+            assert_eq!(staged.parameters.room_capacity.to_bits(), expected_bits);
+        }
+        assert_eq!(
+            active.parameters.room_capacity.to_bits(),
+            300000.0f32.to_bits()
+        );
+        assert_same_plant(&plant, &control);
+    }
+    assert_eq!(
+        scoped_reply(&mut plant, &mut active, &mut staged, b"d 407 get seed"),
+        ("@407 ok 1\n".into(), false)
+    );
+}
+
+#[test]
 fn designer_apply_replaces_plant_and_reset_reproduces_active_configuration() {
     let mut active = SimulationConfig::default();
     // Exercise seeded behavior without adding any further Designer keys.

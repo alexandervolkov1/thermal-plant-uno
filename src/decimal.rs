@@ -220,16 +220,19 @@ pub(crate) fn write_decimal<W: ufmt::uWrite + ?Sized>(
     debug_assert!(value.is_finite());
     let bits = value.to_bits();
     let magnitude = bits & 0x7fffffff;
-    if bits >> 31 != 0 {
+    let negative = bits >> 31 != 0;
+    if negative {
         writer.write_str("-")?;
     }
-    if magnitude == 0 {
-        return writer.write_str("0");
-    }
-    // Keep the Stage 2 integer representation for exactly representable u32 values.
+    // Keep Stage 2 integer text for nonnegative u32 values, including zero.
     let positive = f32::from_bits(magnitude);
     if positive < 4294967296.0 && positive as u32 as f32 == positive {
-        return ufmt::uwrite!(writer, "{}", positive as u32);
+        ufmt::uwrite!(writer, "{}", positive as u32)?;
+        // Signed integer tokens are invalid for room.capacity's Stage 2 grammar.
+        if negative {
+            writer.write_str(".0")?;
+        }
+        return Ok(());
     }
     let (mut mantissa, exponent) = binary_parts(magnitude);
     // The exact decimal coefficient of any binary32 requires at most 112 digits.
