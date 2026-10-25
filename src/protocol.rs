@@ -10,7 +10,7 @@ pub enum Command {
     State,
 }
 
-fn parse_percent(bytes: &[u8]) -> Option<u8> {
+pub(crate) fn parse_percent(bytes: &[u8]) -> Option<u8> {
     match bytes {
         [single @ b'0'..=b'9'] => Some(single - b'0'),
         [first @ b'1'..=b'9', second @ b'0'..=b'9'] => Some((first - b'0') * 10 + (second - b'0')),
@@ -139,11 +139,11 @@ mod tests {
     #[test]
     fn parses_operator_requests() {
         assert_eq!(
-            parse(b"o 17 get sample_temp"),
+            parse(b"o 17 get t.sample"),
             Ok(Request {
                 id: 17,
                 scope: Scope::Operator,
-                action: Action::Get(b"sample_temp"),
+                action: Action::Get(b"t.sample"),
             })
         );
 
@@ -163,12 +163,12 @@ mod tests {
     #[test]
     fn parses_designer_requests() {
         assert_eq!(
-            parse(b"d 21 set room_capacity 350000"),
+            parse(b"d 21 set room.capacity 350000"),
             Ok(Request {
                 id: 21,
                 scope: Scope::Designer,
                 action: Action::Set {
-                    key: b"room_capacity",
+                    key: b"room.capacity",
                     value: b"350000",
                 },
             })

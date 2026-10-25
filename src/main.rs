@@ -9,7 +9,7 @@ use core::cell::Cell;
 use panic_halt as _;
 use thermal_plant_model::{SimulationConfig, ThermalPlant};
 
-use crate::protocol::{Command, parse_command};
+use crate::protocol::{Action, Command, Scope, parse, parse_command, parse_percent};
 
 const MODEL_PERIOD_MS: u32 = 100;
 
@@ -73,6 +73,63 @@ where
     }
 }
 
+fn write_reply_temperature<W>(writer: &mut W, id: u16, value: f32) -> Result<(), W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    ufmt::uwrite!(writer, "@{} ok ", id)?;
+    write_fixed_2(writer, value)?;
+    ufmt::uwriteln!(writer, "")
+}
+
+fn handle_operator_request<W>(
+    writer: &mut W,
+    id: u16,
+    action: Action<'_>,
+    plant: &mut ThermalPlant,
+) -> Result<(), W::Error>
+where
+    W: ufmt::uWrite + ?Sized,
+{
+    match action {
+        Action::Get(key) if key == b"t.sample" => {
+            write_reply_temperature(writer, id, plant.measured_temperatures().sample_temp)
+        }
+
+        Action::Get(key) if key == b"t.heater" => {
+            write_reply_temperature(writer, id, plant.measured_temperatures().heater_temp)
+        }
+
+        Action::Get(key) if key == b"t.room" => {
+            write_reply_temperature(writer, id, plant.measured_temperatures().room_temp)
+        }
+
+        Action::Get(key) if key == b"power" => {
+            let percent = libm::roundf(plant.power_percent()) as u8;
+            ufmt::uwriteln!(writer, "@{} ok {}", id, percent)
+        }
+
+        Action::Set { key, value } if key == b"power" => match parse_percent(value) {
+            Some(percent) => {
+                if plant.set_power_percent(percent as f32).is_ok() {
+                    ufmt::uwriteln!(writer, "@{} ok", id)
+                } else {
+                    ufmt::uwriteln!(writer, "@{} err value", id)
+                }
+            }
+            None => ufmt::uwriteln!(writer, "@{} err value", id),
+        },
+
+        Action::Get(_) | Action::Set { .. } => {
+            ufmt::uwriteln!(writer, "@{} err key", id)
+        }
+
+        Action::Apply | Action::Reset => {
+            ufmt::uwriteln!(writer, "@{} err unsupported", id)
+        }
+    }
+}
+
 #[arduino_hal::entry]
 fn main() -> ! {
     let dp = arduino_hal::Peripherals::take().unwrap();
@@ -91,7 +148,7 @@ fn main() -> ! {
 
     let mut last_model_step = millis();
 
-    let mut command_buffer = [0u8; 16];
+    let mut command_buffer = [0u8; 64];
     let mut command_len: usize = 0;
 
     let mut discarding_command = false;
@@ -186,6 +243,38 @@ fn main() -> ! {
 
                                     ufmt::uwriteln!(&mut serial, " {}", percent)
                                         .unwrap_infallible();
+                                }
+                            }
+                        } else if command_buffer[0] == b'o' || command_buffer[0] == b'd' {
+                            match parse(&command_buffer[..command_len]) {
+                                Ok(request) => match request.scope {
+                                    Scope::Operator => {
+                                        handle_operator_request(
+                                            &mut serial,
+                                            request.id,
+                                            request.action,
+                                            &mut plant,
+                                        )
+                                        .unwrap_infallible();
+                                    }
+
+                                    Scope::Designer => {
+                                        ufmt::uwriteln!(
+                                            &mut serial,
+                                            "@{} err unsupported",
+                                            request.id
+                                        )
+                                        .unwrap_infallible();
+                                    }
+                                },
+
+                                Err(error) => {
+                                    if let Some(id) = error.id {
+                                        ufmt::uwriteln!(&mut serial, "@{} err syntax", id)
+                                            .unwrap_infallible();
+                                    } else {
+                                        ufmt::uwriteln!(&mut serial, "ERR").unwrap_infallible();
+                                    }
                                 }
                             }
                         } else {
