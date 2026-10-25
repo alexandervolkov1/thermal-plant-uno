@@ -7,12 +7,11 @@ mod protocol;
 use arduino_hal::prelude::*;
 use core::cell::Cell;
 use panic_halt as _;
-use thermal_plant_model::{ThermalInput, ThermalParams, ThermalState, rk2_step};
+use thermal_plant_model::{SimulationConfig, ThermalPlant};
 
 use crate::protocol::{Command, parse_command};
 
 const MODEL_PERIOD_MS: u32 = 100;
-const MODEL_DT: f32 = 0.1;
 
 static MILLIS: avr_device::interrupt::Mutex<Cell<u32>> =
     avr_device::interrupt::Mutex::new(Cell::new(0));
@@ -87,30 +86,8 @@ fn main() -> ! {
         avr_device::interrupt::enable();
     }
 
-    let mut state = ThermalState {
-        heater_temp: 20.0,
-        sample_temp: 20.0,
-    };
-
-    let params = ThermalParams {
-        heater_capacity: 100.0,
-        sample_capacity: 200.0,
-
-        coupling: 2.0,
-
-        heater_loss: 1.0,
-        sample_loss: 0.5,
-
-        heater_radiation: 4.0e-10,
-        sample_radiation: 2.0e-10,
-
-        max_heater_power: 100.0,
-    };
-
-    let mut input = ThermalInput {
-        ambient_temp: 20.0,
-        heater_command: 0.0,
-    };
+    let config = SimulationConfig::default();
+    let mut plant = ThermalPlant::new(config).unwrap();
 
     let mut last_model_step = millis();
 
@@ -139,7 +116,7 @@ fn main() -> ! {
                                     write_temperature(
                                         &mut serial,
                                         "SAMPLE_TEMP",
-                                        state.sample_temp,
+                                        plant.temperatures().sample_temp,
                                     )
                                     .unwrap_infallible();
                                 }
@@ -148,7 +125,7 @@ fn main() -> ! {
                                     write_temperature(
                                         &mut serial,
                                         "HEATER_TEMP",
-                                        state.heater_temp,
+                                        plant.temperatures().heater_temp,
                                     )
                                     .unwrap_infallible();
                                 }
@@ -157,26 +134,24 @@ fn main() -> ! {
                                     write_temperature(
                                         &mut serial,
                                         "AMBIENT_TEMP",
-                                        input.ambient_temp,
+                                        config.background_temp,
                                     )
                                     .unwrap_infallible();
                                 }
 
                                 Command::GetPower => {
-                                    let percent = libm::roundf(input.heater_command * 100.0) as u8;
+                                    let percent = libm::roundf(plant.power_percent()) as u8;
                                     ufmt::uwriteln!(&mut serial, "POWER {}", percent)
                                         .unwrap_infallible();
                                 }
 
                                 Command::SetPower(percent) => {
-                                    input.heater_command = percent as f32 / 100.0;
+                                    plant.set_power_percent(percent as f32).unwrap();
                                     ufmt::uwriteln!(&mut serial, "OK").unwrap_infallible();
                                 }
 
                                 Command::Reset => {
-                                    input.heater_command = 0.0;
-                                    state.heater_temp = input.ambient_temp;
-                                    state.sample_temp = input.ambient_temp;
+                                    plant = ThermalPlant::new(config).unwrap();
 
                                     last_model_step = millis();
 
@@ -184,8 +159,9 @@ fn main() -> ! {
                                 }
 
                                 Command::State => {
-                                    ufmt::uwrite!(&mut serial, "STATE ").unwrap_infallible();
+                                    let state = plant.temperatures();
 
+                                    ufmt::uwrite!(&mut serial, "STATE ").unwrap_infallible();
                                     write_fixed_2(&mut serial, state.heater_temp)
                                         .unwrap_infallible();
 
@@ -194,10 +170,10 @@ fn main() -> ! {
                                         .unwrap_infallible();
 
                                     ufmt::uwrite!(&mut serial, " ").unwrap_infallible();
-                                    write_fixed_2(&mut serial, input.ambient_temp)
+                                    write_fixed_2(&mut serial, config.background_temp)
                                         .unwrap_infallible();
 
-                                    let percent = libm::roundf(input.heater_command * 100.0) as u8;
+                                    let percent = libm::roundf(plant.power_percent()) as u8;
 
                                     ufmt::uwriteln!(&mut serial, " {}", percent)
                                         .unwrap_infallible();
@@ -225,7 +201,7 @@ fn main() -> ! {
         let now = millis();
 
         if now.wrapping_sub(last_model_step) >= MODEL_PERIOD_MS {
-            state = rk2_step(state, params, input, MODEL_DT);
+            plant.step();
 
             last_model_step = last_model_step.wrapping_add(MODEL_PERIOD_MS);
         }

@@ -780,7 +780,7 @@ dependencies = [
 [[package]]
 name = "thermal-plant-model"
 version = "0.1.0"
-source = "git+https://github.com/alexandervolkov1/thermal-plant-model.git?rev=e108e1bc6787201c8b0c8197ce2ee45c9b7f05d8#e108e1bc6787201c8b0c8197ce2ee45c9b7f05d8"
+source = "git+https://github.com/alexandervolkov1/thermal-plant-model.git?rev=60430d2b4a18b131d0d40d29fd7bd58a01ce5c88#60430d2b4a18b131d0d40d29fd7bd58a01ce5c88"
 
 [[package]]
 name = "thermal-plant-uno"
