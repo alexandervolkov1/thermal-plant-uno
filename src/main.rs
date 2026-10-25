@@ -168,7 +168,7 @@ fn main() -> ! {
                                 }
 
                                 Command::State => {
-                                    let state = plant.temperatures();
+                                    let state = plant.measured_temperatures();
 
                                     ufmt::uwrite!(&mut serial, "STATE ").unwrap_infallible();
                                     write_fixed_2(&mut serial, state.heater_temp)
